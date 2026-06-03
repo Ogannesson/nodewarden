@@ -28,8 +28,9 @@ export class TotpTwoFactorProvider implements TwoFactorProvider {
   }
 
   isEnabledForUser(user: User, _twoFactorRows: TwoFactorRow[]): boolean {
-    // Legacy column path: enabled iff totp_secret is set and non-empty.
-    return isTotpEnabled(user.totpSecret);
+    // Secret must exist AND the per-user enabled flag must be true.
+    // totpEnabled=false means the user intentionally disabled TOTP (reversible).
+    return isTotpEnabled(user.totpSecret) && user.totpEnabled !== false;
   }
 
   async buildChallenge(_ctx: ChallengeContext): Promise<null> {
@@ -39,7 +40,8 @@ export class TotpTwoFactorProvider implements TwoFactorProvider {
 
   async verify(ctx: VerifyContext, token: string): Promise<boolean> {
     const secret = ctx.user.totpSecret;
-    if (!secret || !isTotpEnabled(secret)) return false;
+    // Only verify when both secret exists AND TOTP is actively enabled.
+    if (!secret || !isTotpEnabled(secret) || ctx.user.totpEnabled === false) return false;
     return verifyTotpToken(secret, token);
   }
 }

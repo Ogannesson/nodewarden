@@ -1179,7 +1179,22 @@ const zhTW: Record<string, string> = {
   "txt_email_mfa_disable_title": "停用電子郵件驗證",
   "txt_email_mfa_disable_msg": "請輸入主密碼以停用電子郵件兩步驟驗證。",
   "txt_email_mfa_disable_success": "電子郵件驗證已停用",
-  "txt_email_mfa_disable_failed": "停用電子郵件驗證失敗"
+  "txt_email_mfa_disable_failed": "停用電子郵件驗證失敗",
+  "txt_email_mfa_reenable_failed": "重新啟用電子郵件驗證失敗",
+  "txt_totp_reenabled": "TOTP 已重新啟用",
+  "txt_reenable_totp_failed": "重新啟用 TOTP 失敗",
+  "txt_reenable_totp": "重新啟用 TOTP",
+  "txt_reenable_totp_msg": "請輸入主密碼以重新啟用 TOTP。您的驗證器 App 設定已保留，無需重新掃描。",
+  "txt_totp_configured_but_disabled": "TOTP 已設定但目前已停用，點擊開關可重新啟用。",
+  "txt_webauthn_reenabled": "安全金鑰已重新啟用",
+  "txt_reenable_webauthn_failed": "重新啟用安全金鑰失敗",
+  "txt_reenable_webauthn": "重新啟用安全金鑰",
+  "txt_reenable_webauthn_msg": "請輸入主密碼以重新啟用已註冊的安全金鑰。",
+  "txt_email_mfa_reenabled": "電子郵件驗證已重新啟用",
+  "txt_reenable_email_mfa_failed": "重新啟用電子郵件驗證失敗",
+  "txt_reenable_email_mfa": "重新啟用電子郵件驗證",
+  "txt_reenable_email_mfa_msg": "請輸入主密碼以重新啟用電子郵件兩步驗證。您的已註冊電子郵件已保留，無需重新設定。",
+  "txt_email_mfa_configured_but_disabled": "電子郵件兩步驗證已設定但目前已停用，點擊開關可重新啟用。"
 };
 
 export default zhTW;

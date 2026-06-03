@@ -725,8 +725,9 @@ export async function renameCredential(
 }
 
 /**
- * Disable all WebAuthn credentials for a user.
- * Sets enabled=0 and clears the credentials array.
+ * Disable all WebAuthn credentials for a user (reversible).
+ * Sets enabled=0 but PRESERVES the credentials array so they can be re-enabled
+ * without re-registering. Use this for the toggle-off path.
  * No-op if no row exists.
  */
 export async function disableAllWebAuthn(
@@ -735,10 +736,39 @@ export async function disableAllWebAuthn(
 ): Promise<void> {
   const nowIso = new Date().toISOString();
   await db.prepare(
-    'UPDATE two_factors SET enabled = 0, data = ?, updated_at = ? WHERE user_id = ? AND atype = ?'
+    'UPDATE two_factors SET enabled = 0, updated_at = ? WHERE user_id = ? AND atype = ?'
   )
-    .bind(JSON.stringify({ credentials: [] }), nowIso, userId, TwoFactorType.WebAuthn)
+    .bind(nowIso, userId, TwoFactorType.WebAuthn)
     .run();
+}
+
+/**
+ * Re-enable WebAuthn for a user that was previously disabled via disableAllWebAuthn.
+ * Requires that credentials still exist in the row's data.
+ * Returns false if no row was found or no credentials are retained.
+ */
+export async function reenableAllWebAuthn(
+  db: D1Database,
+  userId: string
+): Promise<boolean> {
+  const row = await db
+    .prepare('SELECT data FROM two_factors WHERE user_id = ? AND atype = ?')
+    .bind(userId, TwoFactorType.WebAuthn)
+    .first<{ data: string }>();
+
+  if (!row) return false;
+
+  const store = parseCredentialStore({ ...row, userId, atype: TwoFactorType.WebAuthn, enabled: false, lastUsed: null, createdAt: '', updatedAt: '' } as TwoFactorRow);
+  if (store.credentials.length === 0) return false;
+
+  const nowIso = new Date().toISOString();
+  await db.prepare(
+    'UPDATE two_factors SET enabled = 1, updated_at = ? WHERE user_id = ? AND atype = ?'
+  )
+    .bind(nowIso, userId, TwoFactorType.WebAuthn)
+    .run();
+
+  return true;
 }
 
 /**

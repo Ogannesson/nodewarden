@@ -10,12 +10,16 @@ import type { WebAuthnKeyInfo } from '@/lib/api/auth';
 interface SettingsPageProps {
   profile: Profile;
   totpEnabled: boolean;
+  /** True if a TOTP secret exists but TOTP may be disabled (reversible). Used to show re-enable vs set-up. */
+  totpConfigured?: boolean;
   lockTimeoutMinutes: 0 | 1 | 5 | 15 | 30;
   sessionTimeoutAction: 'lock' | 'logout';
   onChangePassword: (currentPassword: string, nextPassword: string, nextPassword2: string) => Promise<void>;
   onSavePasswordHint: (masterPasswordHint: string) => Promise<void>;
   onEnableTotp: (secret: string, token: string) => Promise<void>;
   onOpenDisableTotp: () => void;
+  /** Re-enable TOTP using only master password (no re-scan needed). */
+  onReEnableTotp?: (masterPassword: string) => Promise<void>;
   onGetRecoveryCode: (masterPassword: string) => Promise<string>;
   onGetApiKey: (masterPassword: string) => Promise<string>;
   onRotateApiKey: (masterPassword: string) => Promise<string>;
@@ -24,13 +28,21 @@ interface SettingsPageProps {
   onNotify?: (type: 'success' | 'error', text: string) => void;
   webAuthnKeys?: WebAuthnKeyInfo[];
   webAuthnKeysLoading?: boolean;
+  /** Whether WebAuthn is actively enabled (false = soft-disabled, credentials retained). */
+  webAuthnEnabled?: boolean;
   onRegisterWebAuthnKey?: (masterPassword: string, keyName: string) => Promise<WebAuthnKeyInfo[]>;
   onDeleteWebAuthnKey?: (masterPassword: string, keyId: string) => Promise<void>;
   onRenameWebAuthnKey?: (credentialId: string, name: string) => Promise<WebAuthnKeyInfo[]>;
   onDisableAllWebAuthn?: (masterPassword: string) => Promise<void>;
+  /** Re-enable all WebAuthn credentials after a reversible disable. */
+  onReEnableWebAuthn?: (masterPassword: string) => Promise<void>;
   emailTwoFactorEnabled?: boolean;
+  /** True if email enrollment row exists (even if disabled). Allows re-enable without re-setup. */
+  emailTwoFactorConfigured?: boolean;
   emailTwoFactorAvailable?: boolean;
   onDisableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
+  /** Re-enable email 2FA using only master password (no re-enrollment needed). */
+  onReEnableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
 }
 
 /** Classify a WebAuthn credential into a display type based on transports/attachment. */
@@ -133,9 +145,23 @@ export default function SettingsPage(props: SettingsPageProps) {
   const [emailMfaDisablePassword, setEmailMfaDisablePassword] = useState('');
   const [emailMfaDisableSubmitting, setEmailMfaDisableSubmitting] = useState(false);
 
-  // Derived MFA status
-  const mfaEnabled = props.totpEnabled || (props.webAuthnKeys ?? []).length > 0 || !!props.emailTwoFactorEnabled;
-  const activeMethodCount = (props.totpEnabled ? 1 : 0) + ((props.webAuthnKeys ?? []).length > 0 ? 1 : 0) + (!!props.emailTwoFactorEnabled ? 1 : 0);
+  // Re-enable dialogs (shown when configured+disabled → toggle ON)
+  const [reEnableTotpDialogOpen, setReEnableTotpDialogOpen] = useState(false);
+  const [reEnableTotpPassword, setReEnableTotpPassword] = useState('');
+  const [reEnableTotpSubmitting, setReEnableTotpSubmitting] = useState(false);
+
+  const [reEnableWebAuthnDialogOpen, setReEnableWebAuthnDialogOpen] = useState(false);
+  const [reEnableWebAuthnPassword, setReEnableWebAuthnPassword] = useState('');
+  const [reEnableWebAuthnSubmitting, setReEnableWebAuthnSubmitting] = useState(false);
+
+  const [reEnableEmailDialogOpen, setReEnableEmailDialogOpen] = useState(false);
+  const [reEnableEmailPassword, setReEnableEmailPassword] = useState('');
+  const [reEnableEmailSubmitting, setReEnableEmailSubmitting] = useState(false);
+
+  // Derived MFA status — based on actively *enabled* methods (not just configured)
+  const webAuthnActivelyEnabled = !!(props.webAuthnEnabled ?? ((props.webAuthnKeys ?? []).length > 0));
+  const mfaEnabled = props.totpEnabled || webAuthnActivelyEnabled || !!props.emailTwoFactorEnabled;
+  const activeMethodCount = (props.totpEnabled ? 1 : 0) + (webAuthnActivelyEnabled ? 1 : 0) + (!!props.emailTwoFactorEnabled ? 1 : 0);
 
   useEffect(() => {
     clearLegacyTotpSetupSecrets();
@@ -253,6 +279,52 @@ export default function SettingsPage(props: SettingsPageProps) {
       props.onNotify?.('error', e instanceof Error ? e.message : t('txt_email_mfa_disable_failed'));
     } finally {
       setEmailMfaDisableSubmitting(false);
+    }
+  }
+
+  async function submitReEnableTotp(): Promise<void> {
+    if (!reEnableTotpPassword.trim() || reEnableTotpSubmitting) return;
+    setReEnableTotpSubmitting(true);
+    try {
+      await props.onReEnableTotp?.(reEnableTotpPassword);
+      props.onNotify?.('success', t('txt_totp_reenabled'));
+      setReEnableTotpDialogOpen(false);
+      setReEnableTotpPassword('');
+      setTotpLocked(true);
+    } catch (e) {
+      props.onNotify?.('error', e instanceof Error ? e.message : t('txt_reenable_totp_failed'));
+    } finally {
+      setReEnableTotpSubmitting(false);
+    }
+  }
+
+  async function submitReEnableWebAuthn(): Promise<void> {
+    if (!reEnableWebAuthnPassword.trim() || reEnableWebAuthnSubmitting) return;
+    setReEnableWebAuthnSubmitting(true);
+    try {
+      await props.onReEnableWebAuthn?.(reEnableWebAuthnPassword);
+      props.onNotify?.('success', t('txt_webauthn_reenabled'));
+      setReEnableWebAuthnDialogOpen(false);
+      setReEnableWebAuthnPassword('');
+    } catch (e) {
+      props.onNotify?.('error', e instanceof Error ? e.message : t('txt_reenable_webauthn_failed'));
+    } finally {
+      setReEnableWebAuthnSubmitting(false);
+    }
+  }
+
+  async function submitReEnableEmail(): Promise<void> {
+    if (!reEnableEmailPassword.trim() || reEnableEmailSubmitting) return;
+    setReEnableEmailSubmitting(true);
+    try {
+      await props.onReEnableEmailTwoFactor?.(reEnableEmailPassword);
+      props.onNotify?.('success', t('txt_email_mfa_reenabled'));
+      setReEnableEmailDialogOpen(false);
+      setReEnableEmailPassword('');
+    } catch (e) {
+      props.onNotify?.('error', e instanceof Error ? e.message : t('txt_reenable_email_mfa_failed'));
+    } finally {
+      setReEnableEmailSubmitting(false);
     }
   }
 
@@ -462,10 +534,14 @@ export default function SettingsPage(props: SettingsPageProps) {
             onClick={() => {
               if (totpLocked) {
                 withLastMethodCheck(() => props.onOpenDisableTotp());
+              } else if (props.totpConfigured && props.onReEnableTotp) {
+                // Configured but disabled → re-enable (no re-scan needed)
+                setReEnableTotpDialogOpen(true);
+                setReEnableTotpPassword('');
               }
-              // When off: the setup form below is already visible
+              // If not configured: setup form below is visible
             }}
-            aria-label={totpLocked ? t('txt_disable_totp') : t('txt_enable_totp')}
+            aria-label={totpLocked ? t('txt_disable_totp') : (props.totpConfigured ? t('txt_reenable_totp') : t('txt_enable_totp'))}
           >
             <span className="mfa-toggle-thumb" />
           </button>
@@ -476,7 +552,13 @@ export default function SettingsPage(props: SettingsPageProps) {
             {t('txt_totp_enabled')}
           </div>
         )}
-        {!totpLocked && (
+        {!totpLocked && props.totpConfigured && (
+          <div className="mfa-method-enabled-note" style={{ opacity: 0.7 }}>
+            <ShieldOff size={14} aria-hidden="true" />
+            {t('txt_totp_configured_but_disabled')}
+          </div>
+        )}
+        {!totpLocked && !props.totpConfigured && (
           <div className="totp-grid">
             <div className="totp-qr">
               <img src={qrDataUrl} alt="TOTP QR" />
@@ -534,16 +616,20 @@ export default function SettingsPage(props: SettingsPageProps) {
           <button
             type="button"
             role="switch"
-            aria-checked={(props.webAuthnKeys ?? []).length > 0}
-            className={(props.webAuthnKeys ?? []).length > 0 ? 'mfa-toggle mfa-toggle--on' : 'mfa-toggle'}
+            aria-checked={webAuthnActivelyEnabled}
+            className={webAuthnActivelyEnabled ? 'mfa-toggle mfa-toggle--on' : 'mfa-toggle'}
             onClick={() => {
-              if ((props.webAuthnKeys ?? []).length > 0) {
+              if (webAuthnActivelyEnabled) {
                 // Turn off: show disable-all dialog (gated by last-method check)
                 withLastMethodCheck(() => setDisableWebAuthnDialogOpen(true));
+              } else if ((props.webAuthnKeys ?? []).length > 0 && props.onReEnableWebAuthn) {
+                // Credentials exist but disabled → re-enable (no re-registration needed)
+                setReEnableWebAuthnDialogOpen(true);
+                setReEnableWebAuthnPassword('');
               }
-              // Turn on when no keys: scroll to add-key form below (nothing to toggle, form already visible)
+              // No credentials at all: add-key form below is visible
             }}
-            aria-label={(props.webAuthnKeys ?? []).length > 0 ? t('txt_webauthn_disable_all_title') : t('txt_webauthn_add_key')}
+            aria-label={webAuthnActivelyEnabled ? t('txt_webauthn_disable_all_title') : ((props.webAuthnKeys ?? []).length > 0 ? t('txt_reenable_webauthn') : t('txt_webauthn_add_key'))}
           >
             <span className="mfa-toggle-thumb" />
           </button>
@@ -668,7 +754,7 @@ export default function SettingsPage(props: SettingsPageProps) {
       </section>
 
       {/* Email 2FA section */}
-      {(props.emailTwoFactorAvailable || props.emailTwoFactorEnabled) && (
+      {(props.emailTwoFactorAvailable || props.emailTwoFactorEnabled || props.emailTwoFactorConfigured) && (
         <section className="card settings-module">
           <div className="settings-module-head">
             <h3>{t('txt_email_mfa')}</h3>
@@ -680,10 +766,14 @@ export default function SettingsPage(props: SettingsPageProps) {
               onClick={() => {
                 if (props.emailTwoFactorEnabled) {
                   withLastMethodCheck(() => setEmailMfaDisableDialogOpen(true));
+                } else if (props.emailTwoFactorConfigured && props.onReEnableEmailTwoFactor) {
+                  // Configured but disabled → re-enable (no re-setup needed)
+                  setReEnableEmailDialogOpen(true);
+                  setReEnableEmailPassword('');
                 }
-                // Turn on: no action needed; user should go through the normal email-2FA enroll flow
+                // Not configured: normal enroll flow (handled elsewhere)
               }}
-              aria-label={props.emailTwoFactorEnabled ? t('txt_email_mfa_disable') : t('txt_email_mfa')}
+              aria-label={props.emailTwoFactorEnabled ? t('txt_email_mfa_disable') : (props.emailTwoFactorConfigured ? t('txt_reenable_email_mfa') : t('txt_email_mfa'))}
             >
               <span className="mfa-toggle-thumb" />
             </button>
@@ -692,6 +782,12 @@ export default function SettingsPage(props: SettingsPageProps) {
             <div className="mfa-method-enabled-note">
               <ShieldCheck size={14} aria-hidden="true" />
               {t('txt_email_mfa_enabled')}
+            </div>
+          )}
+          {!props.emailTwoFactorEnabled && props.emailTwoFactorConfigured && (
+            <div className="mfa-method-enabled-note" style={{ opacity: 0.7 }}>
+              <ShieldOff size={14} aria-hidden="true" />
+              {t('txt_email_mfa_configured_but_disabled')}
             </div>
           )}
         </section>
@@ -930,6 +1026,93 @@ export default function SettingsPage(props: SettingsPageProps) {
             autoComplete="current-password"
             value={emailMfaDisablePassword}
             onInput={(e) => setEmailMfaDisablePassword((e.currentTarget as HTMLInputElement).value)}
+          />
+        </label>
+      </ConfirmDialog>
+
+      {/* Re-enable TOTP dialog */}
+      <ConfirmDialog
+        open={reEnableTotpDialogOpen}
+        title={t('txt_reenable_totp')}
+        message={t('txt_reenable_totp_msg')}
+        confirmText={t('txt_reenable_totp')}
+        cancelText={t('txt_cancel')}
+        confirmDisabled={reEnableTotpSubmitting || !reEnableTotpPassword.trim()}
+        cancelDisabled={reEnableTotpSubmitting}
+        onConfirm={() => void submitReEnableTotp()}
+        onCancel={() => {
+          if (!reEnableTotpSubmitting) {
+            setReEnableTotpDialogOpen(false);
+            setReEnableTotpPassword('');
+          }
+        }}
+      >
+        <label className="field">
+          <span>{t('txt_master_password')}</span>
+          <input
+            className="input"
+            type="password"
+            autoComplete="current-password"
+            value={reEnableTotpPassword}
+            onInput={(e) => setReEnableTotpPassword((e.currentTarget as HTMLInputElement).value)}
+          />
+        </label>
+      </ConfirmDialog>
+
+      {/* Re-enable WebAuthn dialog */}
+      <ConfirmDialog
+        open={reEnableWebAuthnDialogOpen}
+        title={t('txt_reenable_webauthn')}
+        message={t('txt_reenable_webauthn_msg')}
+        confirmText={t('txt_reenable_webauthn')}
+        cancelText={t('txt_cancel')}
+        confirmDisabled={reEnableWebAuthnSubmitting || !reEnableWebAuthnPassword.trim()}
+        cancelDisabled={reEnableWebAuthnSubmitting}
+        onConfirm={() => void submitReEnableWebAuthn()}
+        onCancel={() => {
+          if (!reEnableWebAuthnSubmitting) {
+            setReEnableWebAuthnDialogOpen(false);
+            setReEnableWebAuthnPassword('');
+          }
+        }}
+      >
+        <label className="field">
+          <span>{t('txt_master_password')}</span>
+          <input
+            className="input"
+            type="password"
+            autoComplete="current-password"
+            value={reEnableWebAuthnPassword}
+            onInput={(e) => setReEnableWebAuthnPassword((e.currentTarget as HTMLInputElement).value)}
+          />
+        </label>
+      </ConfirmDialog>
+
+      {/* Re-enable Email MFA dialog */}
+      <ConfirmDialog
+        open={reEnableEmailDialogOpen}
+        title={t('txt_reenable_email_mfa')}
+        message={t('txt_reenable_email_mfa_msg')}
+        confirmText={t('txt_reenable_email_mfa')}
+        cancelText={t('txt_cancel')}
+        confirmDisabled={reEnableEmailSubmitting || !reEnableEmailPassword.trim()}
+        cancelDisabled={reEnableEmailSubmitting}
+        onConfirm={() => void submitReEnableEmail()}
+        onCancel={() => {
+          if (!reEnableEmailSubmitting) {
+            setReEnableEmailDialogOpen(false);
+            setReEnableEmailPassword('');
+          }
+        }}
+      >
+        <label className="field">
+          <span>{t('txt_master_password')}</span>
+          <input
+            className="input"
+            type="password"
+            autoComplete="current-password"
+            value={reEnableEmailPassword}
+            onInput={(e) => setReEnableEmailPassword((e.currentTarget as HTMLInputElement).value)}
           />
         </label>
       </ConfirmDialog>

@@ -17,10 +17,12 @@ import {
   handleRegisterWebAuthn,
   handleDeleteWebAuthn,
   handleRenameWebAuthn,
+  handleReenableWebAuthn,
   handleGetEmailTwoFactor,
   handleSendEmailSetup,
   handleEnableEmailTwoFactor,
   handleDisableEmailTwoFactor,
+  handleReenableEmailTwoFactor,
 } from './handlers/accounts';
 import {
   handleGetCiphers,
@@ -130,12 +132,22 @@ export async function handleAuthenticatedRoute(
     return null;
   }
 
+  // WebAuthn re-enable (reversible disable path)
+  if (path === '/api/two-factor/webauthn/reenable' && method === 'POST') {
+    return handleReenableWebAuthn(request, env, userId);
+  }
+
   // Email 2FA management endpoints (P2)
   if (path === '/api/two-factor/email' || path === '/api/two-factor/get-email') {
     if (method === 'GET') return handleGetEmailTwoFactor(request, env, userId);
     if (method === 'PUT' || method === 'POST') return handleEnableEmailTwoFactor(request, env, userId);
     if (method === 'DELETE') return handleDisableEmailTwoFactor(request, env, userId);
     return null;
+  }
+
+  // Email 2FA re-enable (reversible disable path)
+  if (path === '/api/two-factor/email/reenable' && method === 'POST') {
+    return handleReenableEmailTwoFactor(request, env, userId);
   }
   // Authenticated send-email (setup flow): POST /api/two-factor/send-email
   if (path === '/api/two-factor/send-email' && method === 'POST') {

@@ -1179,7 +1179,22 @@ const es: Record<string, string> = {
   "txt_email_mfa_disable_title": "Deshabilitar verificación por correo electrónico",
   "txt_email_mfa_disable_msg": "Ingrese su contraseña maestra para deshabilitar la verificación en dos pasos por correo.",
   "txt_email_mfa_disable_success": "Verificación por correo electrónico deshabilitada",
-  "txt_email_mfa_disable_failed": "Error al deshabilitar la verificación por correo electrónico"
+  "txt_email_mfa_disable_failed": "Error al deshabilitar la verificación por correo electrónico",
+  "txt_email_mfa_reenable_failed": "Error al volver a habilitar la verificación por correo",
+  "txt_totp_reenabled": "TOTP vuelto a habilitar",
+  "txt_reenable_totp_failed": "Error al volver a habilitar TOTP",
+  "txt_reenable_totp": "Volver a habilitar TOTP",
+  "txt_reenable_totp_msg": "Ingresa tu contraseña maestra para volver a habilitar TOTP. La configuración de tu app de autenticación está preservada, no es necesario volver a escanear.",
+  "txt_totp_configured_but_disabled": "TOTP está configurado pero actualmente deshabilitado. Activa el interruptor para volver a habilitarlo.",
+  "txt_webauthn_reenabled": "Llaves de seguridad vueltas a habilitar",
+  "txt_reenable_webauthn_failed": "Error al volver a habilitar las llaves de seguridad",
+  "txt_reenable_webauthn": "Volver a habilitar llaves de seguridad",
+  "txt_reenable_webauthn_msg": "Ingresa tu contraseña maestra para volver a habilitar tus llaves de seguridad registradas.",
+  "txt_email_mfa_reenabled": "Verificación por correo electrónico vuelta a habilitar",
+  "txt_reenable_email_mfa_failed": "Error al volver a habilitar la verificación por correo",
+  "txt_reenable_email_mfa": "Volver a habilitar verificación por correo",
+  "txt_reenable_email_mfa_msg": "Ingresa tu contraseña maestra para volver a habilitar la autenticación de dos factores por correo. Tu correo registrado está preservado, no es necesario volver a configurarlo.",
+  "txt_email_mfa_configured_but_disabled": "La autenticación de dos factores por correo está configurada pero actualmente deshabilitada. Activa el interruptor para volver a habilitarla."
 };
 
 export default es;

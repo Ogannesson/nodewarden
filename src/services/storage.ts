@@ -131,7 +131,7 @@ const STORAGE_SCHEMA_VERSION_KEY = 'schema.version';
 // Bump this whenever src/services/storage-schema.ts or migrations/0001_init.sql
 // changes. Existing D1 installs only rerun ensureStorageSchema() when this value
 // differs from config.schema.version.
-const STORAGE_SCHEMA_VERSION = '2026-06-03-two-factors';
+const STORAGE_SCHEMA_VERSION = '2026-06-03-totp-reversible';
 
 // D1-backed storage.
 // Contract:

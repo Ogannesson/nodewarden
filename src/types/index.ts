@@ -55,6 +55,8 @@ export interface User {
   status: UserStatus;
   verifyDevices?: boolean;
   totpSecret: string | null;
+  /** Whether TOTP is actively enabled (separate from having a secret — allows reversible disable). */
+  totpEnabled: boolean;
   totpRecoveryCode: string | null;
   apiKey: string | null;
   createdAt: string;

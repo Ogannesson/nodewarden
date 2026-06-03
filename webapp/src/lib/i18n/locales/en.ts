@@ -1179,7 +1179,22 @@ const en: Record<string, string> = {
   "txt_email_mfa_disable_title": "Disable Email Verification",
   "txt_email_mfa_disable_msg": "Enter your master password to disable email two-factor authentication.",
   "txt_email_mfa_disable_success": "Email verification disabled",
-  "txt_email_mfa_disable_failed": "Failed to disable email verification"
+  "txt_email_mfa_disable_failed": "Failed to disable email verification",
+  "txt_email_mfa_reenable_failed": "Failed to re-enable email verification",
+  "txt_totp_reenabled": "TOTP re-enabled",
+  "txt_reenable_totp_failed": "Failed to re-enable TOTP",
+  "txt_reenable_totp": "Re-enable TOTP",
+  "txt_reenable_totp_msg": "Enter your master password to re-enable TOTP. Your authenticator app setup is preserved.",
+  "txt_totp_configured_but_disabled": "TOTP is configured but currently disabled. Toggle to re-enable.",
+  "txt_webauthn_reenabled": "Security keys re-enabled",
+  "txt_reenable_webauthn_failed": "Failed to re-enable security keys",
+  "txt_reenable_webauthn": "Re-enable Security Keys",
+  "txt_reenable_webauthn_msg": "Enter your master password to re-enable your registered security keys.",
+  "txt_email_mfa_reenabled": "Email verification re-enabled",
+  "txt_reenable_email_mfa_failed": "Failed to re-enable email verification",
+  "txt_reenable_email_mfa": "Re-enable Email Verification",
+  "txt_reenable_email_mfa_msg": "Enter your master password to re-enable email two-factor authentication. Your enrolled email is preserved.",
+  "txt_email_mfa_configured_but_disabled": "Email 2FA is configured but currently disabled. Toggle to re-enable."
 };
 
 export default en;

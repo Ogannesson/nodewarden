@@ -129,6 +129,10 @@ const SCHEMA_STATEMENTS: readonly string[] = [
   'PRIMARY KEY (user_id, atype), ' +
   'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)',
   'CREATE INDEX IF NOT EXISTS idx_two_factors_user ON two_factors(user_id)',
+
+  // Migration 0003: reversible TOTP disable — preserve totp_secret, just flip this flag.
+  // DEFAULT 1 means all existing users with a totp_secret remain active after upgrade.
+  'ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 1',
 ];
 
 async function executeSchemaStatement(db: D1Database, statement: string): Promise<void> {

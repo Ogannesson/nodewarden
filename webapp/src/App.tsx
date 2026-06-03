@@ -23,6 +23,9 @@ import {
   stripProfileSecrets,
   getWebAuthnChallenge,
   getEmailTwoFactorStatus,
+  reEnableTotp,
+  reEnableWebAuthn,
+  reEnableEmailTwoFactor,
 } from '@/lib/api/auth';
 import { clearAuditLogs, getAuditLogSettings, listAdminInvites, listAdminUsers, listAuditLogs, saveAuditLogSettings, type AuditLogFilters } from '@/lib/api/admin';
 import { getDomainRules, saveDomainRules } from '@/lib/api/domains';
@@ -50,7 +53,7 @@ import {
   type PendingTotp,
   type PendingWebAuthn,
 } from '@/lib/app-auth';
-import { performWebAuthnAssertion } from '@/lib/api/auth';
+import { performWebAuthnAssertion, deriveLoginHash } from '@/lib/api/auth';
 import useAccountSecurityActions from '@/hooks/useAccountSecurityActions';
 import useAdminActions from '@/hooks/useAdminActions';
 import useBackupActions from '@/hooks/useBackupActions';
@@ -1043,7 +1046,7 @@ export default function App() {
     queryKey: ['webauthn-keys', vaultCacheKey || session?.email],
     queryFn: async () => {
       const data = await getWebAuthnChallenge(authedFetch);
-      return data.keys ?? [];
+      return { keys: data.keys ?? [], enabled: data.enabled ?? (data.keys ?? []).length > 0 };
     },
     enabled: !IS_DEMO_MODE && phase === 'app' && !!session?.accessToken && vaultInitialDecryptDone,
     staleTime: 30_000,
@@ -1634,15 +1637,36 @@ export default function App() {
     onRemoveDevice: accountSecurityActions.openRemoveDevice,
     onRevokeAllDeviceTrust: accountSecurityActions.openRevokeAllDeviceTrust,
     onRemoveAllDevices: accountSecurityActions.openRemoveAllDevices,
-    webAuthnKeys: webAuthnKeysQuery.data || [],
+    webAuthnKeys: webAuthnKeysQuery.data?.keys || [],
+    webAuthnEnabled: webAuthnKeysQuery.data?.enabled,
     webAuthnKeysLoading: webAuthnKeysQuery.isFetching && !webAuthnKeysQuery.data,
     onRegisterWebAuthnKey: accountSecurityActions.registerWebAuthnKey,
     onDeleteWebAuthnKey: accountSecurityActions.deleteWebAuthnKey,
     onRenameWebAuthnKey: accountSecurityActions.renameWebAuthnKey,
     onDisableAllWebAuthn: accountSecurityActions.disableAllWebAuthn,
+    onReEnableWebAuthn: async (masterPassword: string) => {
+      if (!profile) throw new Error('Profile unavailable');
+      const derived = await deriveLoginHash(profile.email, masterPassword, defaultKdfIterations);
+      await reEnableWebAuthn(authedFetch, derived.hash);
+      await webAuthnKeysQuery.refetch();
+    },
     emailTwoFactorEnabled: emailTwoFactorQuery.data?.enabled,
+    emailTwoFactorConfigured: emailTwoFactorQuery.data?.configured,
     emailTwoFactorAvailable: emailTwoFactorQuery.data?.available,
     onDisableEmailTwoFactor: accountSecurityActions.disableEmailTwoFactor,
+    onReEnableEmailTwoFactor: async (masterPassword: string) => {
+      if (!profile) throw new Error('Profile unavailable');
+      const derived = await deriveLoginHash(profile.email, masterPassword, defaultKdfIterations);
+      await reEnableEmailTwoFactor(authedFetch, derived.hash);
+      await emailTwoFactorQuery.refetch();
+    },
+    totpConfigured: totpStatusQuery.data?.configured,
+    onReEnableTotp: async (masterPassword: string) => {
+      if (!profile) throw new Error('Profile unavailable');
+      const derived = await deriveLoginHash(profile.email, masterPassword, defaultKdfIterations);
+      await reEnableTotp(authedFetch, derived.hash);
+      await totpStatusQuery.refetch();
+    },
     onRefreshAdmin: adminActions.refreshAdmin,
     onCreateInvite: adminActions.createInvite,
     onDeleteAllInvites: adminActions.deleteAllInvites,

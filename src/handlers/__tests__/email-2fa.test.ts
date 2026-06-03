@@ -126,6 +126,7 @@ function makeUser(overrides: Partial<User> = {}): User {
     role: 'user',
     status: 'active',
     totpSecret: null,
+    totpEnabled: true,
     totpRecoveryCode: null,
     apiKey: null,
     createdAt: '2023-01-01T00:00:00Z',

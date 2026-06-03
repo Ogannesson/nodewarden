@@ -1179,7 +1179,22 @@ const zhCN: Record<string, string> = {
   "txt_email_mfa_disable_title": "禁用邮件验证",
   "txt_email_mfa_disable_msg": "请输入主密码以禁用邮件两步验证。",
   "txt_email_mfa_disable_success": "邮件验证已禁用",
-  "txt_email_mfa_disable_failed": "禁用邮件验证失败"
+  "txt_email_mfa_disable_failed": "禁用邮件验证失败",
+  "txt_email_mfa_reenable_failed": "重新启用邮件验证失败",
+  "txt_totp_reenabled": "TOTP 已重新启用",
+  "txt_reenable_totp_failed": "重新启用 TOTP 失败",
+  "txt_reenable_totp": "重新启用 TOTP",
+  "txt_reenable_totp_msg": "请输入主密码以重新启用 TOTP。您的验证器 App 配置已保留，无需重新扫码。",
+  "txt_totp_configured_but_disabled": "TOTP 已配置但当前已禁用，点击开关可重新启用。",
+  "txt_webauthn_reenabled": "安全密钥已重新启用",
+  "txt_reenable_webauthn_failed": "重新启用安全密钥失败",
+  "txt_reenable_webauthn": "重新启用安全密钥",
+  "txt_reenable_webauthn_msg": "请输入主密码以重新启用已注册的安全密钥。",
+  "txt_email_mfa_reenabled": "邮件验证已重新启用",
+  "txt_reenable_email_mfa_failed": "重新启用邮件验证失败",
+  "txt_reenable_email_mfa": "重新启用邮件验证",
+  "txt_reenable_email_mfa_msg": "请输入主密码以重新启用邮件两步验证。您的已注册邮件已保留，无需重新设置。",
+  "txt_email_mfa_configured_but_disabled": "邮件两步验证已配置但当前已禁用，点击开关可重新启用。"
 };
 
 export default zhCN;

@@ -1179,7 +1179,22 @@ const ru: Record<string, string> = {
   "txt_email_mfa_disable_title": "Отключить аутентификацию по email",
   "txt_email_mfa_disable_msg": "Введите мастер-пароль для отключения двухфакторной аутентификации по email.",
   "txt_email_mfa_disable_success": "Аутентификация по email отключена",
-  "txt_email_mfa_disable_failed": "Не удалось отключить аутентификацию по email"
+  "txt_email_mfa_disable_failed": "Не удалось отключить аутентификацию по email",
+  "txt_email_mfa_reenable_failed": "Не удалось повторно включить аутентификацию по email",
+  "txt_totp_reenabled": "TOTP снова включён",
+  "txt_reenable_totp_failed": "Не удалось повторно включить TOTP",
+  "txt_reenable_totp": "Повторно включить TOTP",
+  "txt_reenable_totp_msg": "Введите мастер-пароль для повторного включения TOTP. Настройка в приложении-аутентификаторе сохранена, повторное сканирование не требуется.",
+  "txt_totp_configured_but_disabled": "TOTP настроен, но в данный момент отключён. Переключите, чтобы включить снова.",
+  "txt_webauthn_reenabled": "Ключи безопасности снова включены",
+  "txt_reenable_webauthn_failed": "Не удалось повторно включить ключи безопасности",
+  "txt_reenable_webauthn": "Повторно включить ключи безопасности",
+  "txt_reenable_webauthn_msg": "Введите мастер-пароль для повторного включения зарегистрированных ключей безопасности.",
+  "txt_email_mfa_reenabled": "Аутентификация по email снова включена",
+  "txt_reenable_email_mfa_failed": "Не удалось повторно включить аутентификацию по email",
+  "txt_reenable_email_mfa": "Повторно включить аутентификацию по email",
+  "txt_reenable_email_mfa_msg": "Введите мастер-пароль для повторного включения двухфакторной аутентификации по email. Зарегистрированный email сохранён, повторная настройка не требуется.",
+  "txt_email_mfa_configured_but_disabled": "Двухфакторная аутентификация по email настроена, но в данный момент отключена. Переключите, чтобы включить снова."
 };
 
 export default ru;

@@ -618,11 +618,69 @@ export async function getVaultRevisionDate(authedFetch: AuthedFetch): Promise<nu
   return stamp;
 }
 
-export async function getTotpStatus(authedFetch: AuthedFetch): Promise<{ enabled: boolean }> {
+export async function getTotpStatus(authedFetch: AuthedFetch): Promise<{ enabled: boolean; configured: boolean }> {
   const resp = await authedFetch('/api/accounts/totp');
   if (!resp.ok) throw new Error('Failed to load TOTP status');
-  const body = (await parseJson<{ enabled?: boolean }>(resp)) || {};
-  return { enabled: !!body.enabled };
+  const body = (await parseJson<{ enabled?: boolean; configured?: boolean }>(resp)) || {};
+  return { enabled: !!body.enabled, configured: !!body.configured };
+}
+
+/**
+ * Re-enable TOTP (reversible disable recovery).
+ * Requires masterPasswordHash. Secret is retained from the previous disable.
+ * Use only when configured=true && enabled=false.
+ */
+export async function reEnableTotp(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string
+): Promise<void> {
+  const resp = await authedFetch('/api/accounts/totp', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: true, masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const body = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(body?.error_description || body?.error, t('txt_totp_update_failed')));
+  }
+}
+
+/**
+ * Re-enable all WebAuthn credentials after a reversible soft-disable.
+ * Requires masterPasswordHash. Credentials are preserved from the previous disable.
+ */
+export async function reEnableWebAuthn(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string
+): Promise<void> {
+  const resp = await authedFetch('/api/two-factor/webauthn/reenable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_disable_all_failed')));
+  }
+}
+
+/**
+ * Re-enable Email 2FA after a reversible soft-disable.
+ * Requires masterPasswordHash. Enrolled email is retained.
+ */
+export async function reEnableEmailTwoFactor(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string
+): Promise<void> {
+  const resp = await authedFetch('/api/two-factor/email/reenable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_email_mfa_reenable_failed')));
+  }
 }
 
 export async function getTotpRecoveryCode(
@@ -770,6 +828,8 @@ interface WebAuthnChallengeResponse {
   excludeCredentials?: Array<{ type: string; id: string }>;
   authenticatorSelection?: Record<string, unknown>;
   attestation?: string;
+  /** Whether WebAuthn is actively enabled (false = soft-disabled, credentials retained). */
+  enabled?: boolean;
   keys?: WebAuthnKeyInfo[];
   status?: string;
   errorMessage?: string;
@@ -1019,12 +1079,12 @@ export async function performWebAuthnAssertion(
  * GET /api/two-factor/email
  * Returns whether email 2FA is enabled for the current user.
  */
-export async function getEmailTwoFactorStatus(authedFetch: AuthedFetch): Promise<{ enabled: boolean; available: boolean }> {
+export async function getEmailTwoFactorStatus(authedFetch: AuthedFetch): Promise<{ enabled: boolean; available: boolean; configured: boolean }> {
   const resp = await authedFetch('/api/two-factor/email', { method: 'GET' });
-  if (!resp.ok) return { enabled: false, available: false };
-  const result = (await parseJson<{ enabled?: boolean; available?: boolean }>(resp)) || {};
+  if (!resp.ok) return { enabled: false, available: false, configured: false };
+  const result = (await parseJson<{ enabled?: boolean; available?: boolean; configured?: boolean }>(resp)) || {};
   // available is explicitly returned by the server (true only when RESEND_API_KEY + MFA_EMAIL_FROM are set)
-  return { enabled: !!result.enabled, available: !!result.available };
+  return { enabled: !!result.enabled, available: !!result.available, configured: !!result.configured };
 }
 
 /**

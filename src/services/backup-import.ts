@@ -613,8 +613,11 @@ async function importBackupRows(db: D1Database, payload: BackupPayload['db'], us
     buildInsertStatements(
       db,
       tableName('users'),
-      ['id', 'email', 'name', 'master_password_hint', 'master_password_hash', 'key', 'private_key', 'public_key', 'kdf_type', 'kdf_iterations', 'kdf_memory', 'kdf_parallelism', 'security_stamp', 'role', 'status', 'verify_devices', 'totp_secret', 'totp_recovery_code', 'created_at', 'updated_at'],
-      payload.users || []
+      ['id', 'email', 'name', 'master_password_hint', 'master_password_hash', 'key', 'private_key', 'public_key', 'kdf_type', 'kdf_iterations', 'kdf_memory', 'kdf_parallelism', 'security_stamp', 'role', 'status', 'verify_devices', 'totp_secret', 'totp_enabled', 'totp_recovery_code', 'created_at', 'updated_at'],
+      // Backfill totp_enabled=1 for rows from older backups that predate the column.
+      // The column is NOT NULL DEFAULT 1, so null would cause a constraint violation.
+      // Defaulting to 1 preserves the existing TOTP activation state for migrated users.
+      (payload.users || []).map((row) => row.totp_enabled == null ? { ...row, totp_enabled: 1 } : row)
     )
   );
   await runInsertBatch(

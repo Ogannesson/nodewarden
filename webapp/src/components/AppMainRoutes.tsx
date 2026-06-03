@@ -125,14 +125,20 @@ export interface AppMainRoutesProps {
   onRevokeAllDeviceTrust: () => void;
   onRemoveAllDevices: () => void;
   webAuthnKeys: WebAuthnKeyInfo[];
+  webAuthnEnabled?: boolean;
   webAuthnKeysLoading: boolean;
   onRegisterWebAuthnKey: (masterPassword: string, keyName: string) => Promise<WebAuthnKeyInfo[]>;
   onDeleteWebAuthnKey: (masterPassword: string, keyId: string) => Promise<void>;
   onRenameWebAuthnKey?: (credentialId: string, name: string) => Promise<WebAuthnKeyInfo[]>;
   onDisableAllWebAuthn?: (masterPassword: string) => Promise<void>;
+  onReEnableWebAuthn?: (masterPassword: string) => Promise<void>;
   emailTwoFactorEnabled?: boolean;
+  emailTwoFactorConfigured?: boolean;
   emailTwoFactorAvailable?: boolean;
   onDisableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
+  onReEnableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
+  totpConfigured?: boolean;
+  onReEnableTotp?: (masterPassword: string) => Promise<void>;
   onCreateInvite: (hours: number) => Promise<void>;
   onRefreshAdmin: () => void;
   onDeleteAllInvites: () => Promise<void>;
@@ -280,9 +286,15 @@ export default function AppMainRoutes(props: AppMainRoutesProps) {
                 onDeleteWebAuthnKey={props.onDeleteWebAuthnKey}
                 onRenameWebAuthnKey={props.onRenameWebAuthnKey}
                 onDisableAllWebAuthn={props.onDisableAllWebAuthn}
+                onReEnableWebAuthn={props.onReEnableWebAuthn}
+                webAuthnEnabled={props.webAuthnEnabled}
                 emailTwoFactorEnabled={props.emailTwoFactorEnabled}
+                emailTwoFactorConfigured={props.emailTwoFactorConfigured}
                 emailTwoFactorAvailable={props.emailTwoFactorAvailable}
                 onDisableEmailTwoFactor={props.onDisableEmailTwoFactor}
+                onReEnableEmailTwoFactor={props.onReEnableEmailTwoFactor}
+                totpConfigured={props.totpConfigured}
+                onReEnableTotp={props.onReEnableTotp}
               />
             </Suspense>
           </div>

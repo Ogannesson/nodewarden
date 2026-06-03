@@ -183,6 +183,7 @@ function makeUser(id: string = 'user-001'): User {
     role: 'user',
     status: 'active',
     totpSecret: null,
+    totpEnabled: true,
     totpRecoveryCode: null,
     apiKey: null,
     createdAt: '2023-01-01T00:00:00Z',
@@ -568,13 +569,14 @@ describe('disableAllWebAuthn', () => {
     return { db, updateCalledWith };
   }
 
-  it('clears all credentials and sets enabled=0', async () => {
+  it('sets enabled=0 but preserves credentials (reversible soft-disable)', async () => {
     const { db, updateCalledWith } = buildDisableDb();
     await disableAllWebAuthn(db, 'user-1');
     expect(updateCalledWith).toHaveLength(1);
-    const [savedData, , userId] = updateCalledWith[0]!;
-    expect(JSON.parse(savedData as string)).toEqual({ credentials: [] });
+    // New soft-disable: UPDATE SET enabled=0, updated_at=? — binds are (nowIso, userId, atype).
+    const [_nowIso, userId, _atype] = updateCalledWith[0]!;
     expect(userId).toBe('user-1');
+    // data column is NOT touched — credentials remain in the DB row.
   });
 
   it('does not throw when no row exists (UPDATE affects 0 rows)', async () => {

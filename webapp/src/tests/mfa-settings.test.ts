@@ -190,3 +190,139 @@ describe('classifyKey / getKeyType 密钥类型分类', () => {
     expect(classifyKey({ attachment: 'cross-platform', transports: ['usb'] })).toBe('txt_webauthn_type_usb');
   });
 });
+
+// ---------------------------------------------------------------------------
+// 4. 可逆禁用前端开关分支逻辑
+// ---------------------------------------------------------------------------
+
+/**
+ * 模拟 SettingsPage 中 TOTP 切换逻辑：
+ * - 若当前激活（enabled=true）→ 触发禁用流程
+ * - 若配置存在但已禁用（configured=true, enabled=false）→ 触发重启用流程
+ * - 若未配置（configured=false, enabled=false）→ 走原设置流程（显示设置表单）
+ */
+function simulateTotpToggle(opts: {
+  totpEnabled: boolean;
+  totpConfigured: boolean;
+  hasReEnableCallback: boolean;
+}): 'disable' | 'reenable' | 'setup' | 'noop' {
+  if (opts.totpEnabled) return 'disable';
+  if (opts.totpConfigured && opts.hasReEnableCallback) return 'reenable';
+  return 'setup';
+}
+
+/**
+ * 模拟 SettingsPage 中 WebAuthn 切换逻辑。
+ */
+function simulateWebAuthnToggle(opts: {
+  webAuthnActivelyEnabled: boolean;
+  hasRetainedCredentials: boolean;
+  hasReEnableCallback: boolean;
+}): 'disable' | 'reenable' | 'add-key' | 'noop' {
+  if (opts.webAuthnActivelyEnabled) return 'disable';
+  if (opts.hasRetainedCredentials && opts.hasReEnableCallback) return 'reenable';
+  return 'add-key';
+}
+
+/**
+ * 模拟 SettingsPage 中 Email 切换逻辑。
+ */
+function simulateEmailToggle(opts: {
+  emailEnabled: boolean;
+  emailConfigured: boolean;
+  hasReEnableCallback: boolean;
+}): 'disable' | 'reenable' | 'noop' {
+  if (opts.emailEnabled) return 'disable';
+  if (opts.emailConfigured && opts.hasReEnableCallback) return 'reenable';
+  return 'noop';
+}
+
+describe('TOTP 可逆禁用前端开关逻辑', () => {
+  it('激活状态 toggle→ 触发禁用流程', () => {
+    expect(simulateTotpToggle({ totpEnabled: true, totpConfigured: true, hasReEnableCallback: true }))
+      .toBe('disable');
+  });
+
+  it('已配置但已禁用 + 有重启用回调 → 触发重启用', () => {
+    expect(simulateTotpToggle({ totpEnabled: false, totpConfigured: true, hasReEnableCallback: true }))
+      .toBe('reenable');
+  });
+
+  it('已配置但已禁用 + 无重启用回调 → 走设置流程（降级）', () => {
+    expect(simulateTotpToggle({ totpEnabled: false, totpConfigured: true, hasReEnableCallback: false }))
+      .toBe('setup');
+  });
+
+  it('未配置 → 走原设置流程', () => {
+    expect(simulateTotpToggle({ totpEnabled: false, totpConfigured: false, hasReEnableCallback: true }))
+      .toBe('setup');
+  });
+});
+
+describe('WebAuthn 可逆禁用前端开关逻辑', () => {
+  it('激活状态 toggle→ 触发禁用流程', () => {
+    expect(simulateWebAuthnToggle({ webAuthnActivelyEnabled: true, hasRetainedCredentials: true, hasReEnableCallback: true }))
+      .toBe('disable');
+  });
+
+  it('有保留 credentials + enabled=false + 有回调 → 重启用', () => {
+    expect(simulateWebAuthnToggle({ webAuthnActivelyEnabled: false, hasRetainedCredentials: true, hasReEnableCallback: true }))
+      .toBe('reenable');
+  });
+
+  it('无 credentials + enabled=false → 走注册流程', () => {
+    expect(simulateWebAuthnToggle({ webAuthnActivelyEnabled: false, hasRetainedCredentials: false, hasReEnableCallback: true }))
+      .toBe('add-key');
+  });
+});
+
+describe('Email 可逆禁用前端开关逻辑', () => {
+  it('已启用 toggle → 触发禁用', () => {
+    expect(simulateEmailToggle({ emailEnabled: true, emailConfigured: true, hasReEnableCallback: true }))
+      .toBe('disable');
+  });
+
+  it('已配置但已禁用 + 有回调 → 重启用', () => {
+    expect(simulateEmailToggle({ emailEnabled: false, emailConfigured: true, hasReEnableCallback: true }))
+      .toBe('reenable');
+  });
+
+  it('未配置 → noop（不启动任何流程）', () => {
+    expect(simulateEmailToggle({ emailEnabled: false, emailConfigured: false, hasReEnableCallback: true }))
+      .toBe('noop');
+  });
+});
+
+describe('activeMethodCount 基于 enabled 而非 configured', () => {
+  /**
+   * 新语义：activeMethodCount 必须仅计算激活方法，而非配置的方法。
+   * 例如：TOTP configured=true 但 enabled=false，不应计入 activeMethodCount。
+   */
+  function deriveMfaStatusV2(opts: {
+    totpEnabled: boolean;
+    webAuthnActivelyEnabled: boolean;
+    emailTwoFactorEnabled: boolean;
+  }): { mfaEnabled: boolean; activeMethodCount: number } {
+    const { totpEnabled, webAuthnActivelyEnabled, emailTwoFactorEnabled } = opts;
+    const mfaEnabled = totpEnabled || webAuthnActivelyEnabled || emailTwoFactorEnabled;
+    const activeMethodCount = (totpEnabled ? 1 : 0) + (webAuthnActivelyEnabled ? 1 : 0) + (emailTwoFactorEnabled ? 1 : 0);
+    return { mfaEnabled, activeMethodCount };
+  }
+
+  it('TOTP configured 但 enabled=false → count 不增加', () => {
+    const result = deriveMfaStatusV2({ totpEnabled: false, webAuthnActivelyEnabled: false, emailTwoFactorEnabled: false });
+    expect(result.activeMethodCount).toBe(0);
+    expect(result.mfaEnabled).toBe(false);
+  });
+
+  it('WebAuthn has credentials 但 enabled=false → count 不增加', () => {
+    const result = deriveMfaStatusV2({ totpEnabled: false, webAuthnActivelyEnabled: false, emailTwoFactorEnabled: true });
+    expect(result.activeMethodCount).toBe(1); // 只有 email 算
+    expect(result.mfaEnabled).toBe(true);
+  });
+
+  it('全部激活 → count=3', () => {
+    const result = deriveMfaStatusV2({ totpEnabled: true, webAuthnActivelyEnabled: true, emailTwoFactorEnabled: true });
+    expect(result.activeMethodCount).toBe(3);
+  });
+});
