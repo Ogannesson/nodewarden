@@ -20,6 +20,23 @@ export interface PendingTotp {
   masterKey: Uint8Array;
 }
 
+export interface WebAuthnChallenge {
+  challenge: string;
+  allowCredentials?: Array<{ type: string; id: string }>;
+  rpId?: string;
+  userVerification?: string;
+  timeout?: number;
+}
+
+export interface PendingWebAuthn {
+  email: string;
+  passwordHash: string;
+  masterKey: Uint8Array;
+  /** Whether TOTP is also available as fallback. */
+  hasTotpFallback: boolean;
+  webAuthnChallenge: WebAuthnChallenge;
+}
+
 export type JwtUnsafeReason = 'missing' | 'default' | 'too_short';
 
 export interface BootstrapAppResult {
@@ -49,6 +66,7 @@ export interface CompletedLogin {
 export type PasswordLoginResult =
   | { kind: 'success'; login: CompletedLogin }
   | { kind: 'totp'; pendingTotp: PendingTotp }
+  | { kind: 'webauthn'; pendingWebAuthn: PendingWebAuthn }
   | { kind: 'error'; message: string };
 
 export interface RecoverTwoFactorResult {
@@ -314,8 +332,40 @@ export async function performPasswordLogin(
     };
   }
 
-  const tokenError = token as { TwoFactorProviders?: unknown; error_description?: string; error?: string };
+  const tokenError = token as {
+    TwoFactorProviders?: unknown;
+    TwoFactorProviders2?: Record<string, unknown>;
+    error_description?: string;
+    error?: string;
+  };
   if (tokenError.TwoFactorProviders) {
+    const providers = tokenError.TwoFactorProviders as unknown[];
+    const providers2 = tokenError.TwoFactorProviders2 ?? {};
+
+    // Prefer WebAuthn (provider 7) when the server advertises it.
+    if (Array.isArray(providers) && providers.includes(7) && providers2['7']) {
+      const p7 = providers2['7'] as Record<string, unknown>;
+      const webAuthnChallenge: WebAuthnChallenge = {
+        challenge: String(p7['challenge'] ?? ''),
+        rpId: typeof p7['rpId'] === 'string' ? p7['rpId'] : undefined,
+        userVerification: typeof p7['userVerification'] === 'string' ? p7['userVerification'] : undefined,
+        timeout: typeof p7['timeout'] === 'number' ? p7['timeout'] : undefined,
+        allowCredentials: Array.isArray(p7['allowCredentials'])
+          ? (p7['allowCredentials'] as Array<{ type: string; id: string }>)
+          : [],
+      };
+      return {
+        kind: 'webauthn',
+        pendingWebAuthn: {
+          email: normalizedEmail,
+          passwordHash: derived.hash,
+          masterKey: derived.masterKey,
+          hasTotpFallback: Array.isArray(providers) && providers.includes(0),
+          webAuthnChallenge,
+        },
+      };
+    }
+
     return {
       kind: 'totp',
       pendingTotp: {
@@ -330,6 +380,22 @@ export async function performPasswordLogin(
     kind: 'error',
     message: translateServerError(tokenError.error_description || tokenError.error, t('txt_login_failed')),
   };
+}
+
+export async function performWebAuthnLogin(
+  pendingWebAuthn: PendingWebAuthn,
+  webAuthnToken: string,
+  rememberDevice: boolean
+): Promise<CompletedLogin> {
+  const token = await loginWithPassword(pendingWebAuthn.email, pendingWebAuthn.passwordHash, {
+    webAuthnToken,
+    rememberDevice,
+  });
+  if ('access_token' in token && token.access_token) {
+    return completeLogin(token, pendingWebAuthn.email, pendingWebAuthn.masterKey);
+  }
+  const tokenError = token as { error_description?: string; error?: string };
+  throw new Error(translateServerError(tokenError.error_description || tokenError.error, t('txt_webauthn_assertion_failed')));
 }
 
 export async function performTotpLogin(
@@ -407,8 +473,39 @@ export async function performUnlock(
     };
   }
 
-  const tokenError = token as { TwoFactorProviders?: unknown; error_description?: string; error?: string };
+  const tokenError = token as {
+    TwoFactorProviders?: unknown;
+    TwoFactorProviders2?: Record<string, unknown>;
+    error_description?: string;
+    error?: string;
+  };
   if (tokenError.TwoFactorProviders) {
+    const providers = tokenError.TwoFactorProviders as unknown[];
+    const providers2 = tokenError.TwoFactorProviders2 ?? {};
+
+    if (Array.isArray(providers) && providers.includes(7) && providers2['7']) {
+      const p7 = providers2['7'] as Record<string, unknown>;
+      const webAuthnChallenge: WebAuthnChallenge = {
+        challenge: String(p7['challenge'] ?? ''),
+        rpId: typeof p7['rpId'] === 'string' ? p7['rpId'] : undefined,
+        userVerification: typeof p7['userVerification'] === 'string' ? p7['userVerification'] : undefined,
+        timeout: typeof p7['timeout'] === 'number' ? p7['timeout'] : undefined,
+        allowCredentials: Array.isArray(p7['allowCredentials'])
+          ? (p7['allowCredentials'] as Array<{ type: string; id: string }>)
+          : [],
+      };
+      return {
+        kind: 'webauthn',
+        pendingWebAuthn: {
+          email: normalizedEmail,
+          passwordHash: derived.hash,
+          masterKey: derived.masterKey,
+          hasTotpFallback: Array.isArray(providers) && providers.includes(0),
+          webAuthnChallenge,
+        },
+      };
+    }
+
     return {
       kind: 'totp',
       pendingTotp: {

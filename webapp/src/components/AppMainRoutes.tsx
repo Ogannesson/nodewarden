@@ -10,6 +10,7 @@ import type { CiphersImportPayload } from '@/lib/api/vault';
 import { t } from '@/lib/i18n';
 import type { AdminInvite, AdminUser, AuditLogListResult, AuditLogSettings, AuthorizedDevice, Cipher, CustomEquivalentDomain, DomainRules, Folder as VaultFolder, Profile, Send, SendDraft, SessionState, VaultDraft } from '@/lib/types';
 import type { ExportRequest } from '@/lib/export-formats';
+import type { WebAuthnKeyInfo } from '@/lib/api/auth';
 
 const VaultPage = lazy(() => import('@/components/VaultPage'));
 const SendsPage = lazy(() => import('@/components/SendsPage'));
@@ -123,6 +124,10 @@ export interface AppMainRoutesProps {
   onRemoveDevice: (device: AuthorizedDevice) => void;
   onRevokeAllDeviceTrust: () => void;
   onRemoveAllDevices: () => void;
+  webAuthnKeys: WebAuthnKeyInfo[];
+  webAuthnKeysLoading: boolean;
+  onRegisterWebAuthnKey: (masterPassword: string, keyName: string) => Promise<WebAuthnKeyInfo[]>;
+  onDeleteWebAuthnKey: (masterPassword: string, keyId: string) => Promise<void>;
   onCreateInvite: (hours: number) => Promise<void>;
   onRefreshAdmin: () => void;
   onDeleteAllInvites: () => Promise<void>;
@@ -264,6 +269,10 @@ export default function AppMainRoutes(props: AppMainRoutesProps) {
                 onLockTimeoutChange={props.onLockTimeoutChange}
                 onSessionTimeoutActionChange={props.onSessionTimeoutActionChange}
                 onNotify={props.onNotify}
+                webAuthnKeys={props.webAuthnKeys}
+                webAuthnKeysLoading={props.webAuthnKeysLoading}
+                onRegisterWebAuthnKey={props.onRegisterWebAuthnKey}
+                onDeleteWebAuthnKey={props.onDeleteWebAuthnKey}
               />
             </Suspense>
           </div>

@@ -14,6 +14,10 @@ import {
   trustAuthorizedDevicePermanently,
   updateAuthorizedDeviceName,
   updateProfile,
+  registerWebAuthnKey,
+  deleteWebAuthnKey,
+  getWebAuthnChallenge,
+  type WebAuthnKeyInfo,
 } from '@/lib/api/auth';
 import { t } from '@/lib/i18n';
 import type { AppConfirmState } from '@/components/AppGlobalOverlays';
@@ -34,6 +38,7 @@ interface UseAccountSecurityActionsOptions {
   onSetConfirm: (next: AppConfirmState | null) => void;
   refetchTotpStatus: () => Promise<unknown>;
   refetchAuthorizedDevices: () => Promise<unknown>;
+  refetchWebAuthnKeys: () => Promise<unknown>;
 }
 
 export default function useAccountSecurityActions(options: UseAccountSecurityActionsOptions) {
@@ -49,6 +54,7 @@ export default function useAccountSecurityActions(options: UseAccountSecurityAct
     onSetConfirm,
     refetchTotpStatus,
     refetchAuthorizedDevices,
+    refetchWebAuthnKeys,
   } = options;
 
   return useMemo(
@@ -293,6 +299,30 @@ export default function useAccountSecurityActions(options: UseAccountSecurityAct
           },
         });
       },
+
+      async registerWebAuthnKey(masterPassword: string, keyName: string): Promise<WebAuthnKeyInfo[]> {
+        if (!profile) throw new Error(t('txt_profile_unavailable'));
+        const normalized = String(masterPassword || '');
+        if (!normalized) throw new Error(t('txt_master_password_is_required'));
+        const derived = await deriveLoginHash(profile.email, normalized, defaultKdfIterations);
+        const keys = await registerWebAuthnKey(authedFetch, derived.hash, keyName);
+        await refetchWebAuthnKeys();
+        return keys;
+      },
+
+      async deleteWebAuthnKey(masterPassword: string, keyId: string): Promise<void> {
+        if (!profile) throw new Error(t('txt_profile_unavailable'));
+        const normalized = String(masterPassword || '');
+        if (!normalized) throw new Error(t('txt_master_password_is_required'));
+        const derived = await deriveLoginHash(profile.email, normalized, defaultKdfIterations);
+        await deleteWebAuthnKey(authedFetch, derived.hash, keyId);
+        await refetchWebAuthnKeys();
+      },
+
+      async fetchWebAuthnKeys(): Promise<WebAuthnKeyInfo[]> {
+        const data = await getWebAuthnChallenge(authedFetch);
+        return data.keys ?? [];
+      },
     }),
     [
       authedFetch,
@@ -306,6 +336,7 @@ export default function useAccountSecurityActions(options: UseAccountSecurityAct
       profile,
       refetchAuthorizedDevices,
       refetchTotpStatus,
+      refetchWebAuthnKeys,
     ]
   );
 }

@@ -43,7 +43,7 @@
 | TOTP / Steam TOTP | ✅ | ✅ | 含 `steam://` 支持 |
 | 多用户 | ✅ | ✅ | 支持邀请码注册 |
 | 组织 / 集合 / 成员权限 | ✅ | ❌ | 未实现 |
-| 登录 2FA | ✅ | ⚠️ 部分支持 | 当前仅支持用户级 TOTP |
+| 登录 2FA | ✅ | ✅ | TOTP、WebAuthn/FIDO2 安全密钥、Email 验证码（需配置 `RESEND_API_KEY`） |
 | SSO / SCIM / 企业目录 | ✅ | ❌ | 未实现 |
 
 ---
@@ -144,6 +144,19 @@ npm run dev:kv
 
 ---
 
+## 登录两步验证（2FA）
+
+NodeWarden 支持三种两步验证方式，可在 Web Vault **设置 → 两步登录**中管理：
+
+| 方式 | 启用条件 | 说明 |
+|---|---|---|
+| **TOTP / 验证器 App** | 无需额外配置 | 扫码绑定 Google Authenticator、1Password、Bitwarden 等任意 TOTP App |
+| **WebAuthn / FIDO2 安全密钥** | 无需额外配置 | 支持 YubiKey、Touch ID、Windows Hello 等硬件或平台认证器 |
+| **Email 验证码** | 需配置 `RESEND_API_KEY` + `MFA_EMAIL_FROM`（见 `.dev.vars.example`） | 登录时向绑定邮箱发送 6 位验证码，10 分钟内有效 |
+
+三种方式可同时启用；账户均拥有一个**恢复码**，用于在所有 2FA 方式均不可用时紧急恢复访问。
+
+---
 
 ## 开源协议
 

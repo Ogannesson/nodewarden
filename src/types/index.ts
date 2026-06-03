@@ -10,6 +10,13 @@ export interface Env {
   // Optional fallback for attachment/send file storage (no credit card required).
   ATTACHMENTS_KV?: KVNamespace;
   JWT_SECRET: string;
+  // Email 2FA (P2). Both must be set to enable Email 2FA provider.
+  // If either is absent, isAvailable() returns false and the provider is silently omitted.
+  RESEND_API_KEY?: string;
+  MFA_EMAIL_FROM?: string;
+  // Optional: override Resend API endpoint for local/CI testing.
+  // Example: RESEND_BASE_URL=http://localhost:9876/emails
+  RESEND_BASE_URL?: string;
 }
 
 export type UserRole = 'admin' | 'user';

@@ -34,6 +34,13 @@ interface AppGlobalOverlaysProps {
   onConfirmDisableTotp: () => void;
   onCancelDisableTotp: () => void;
   disableTotpSubmitting: boolean;
+  /** WebAuthn 2FA challenge flow */
+  pendingWebAuthnOpen: boolean;
+  webAuthnSubmitting: boolean;
+  webAuthnHasTotpFallback: boolean;
+  onConfirmWebAuthn: () => void;
+  onCancelWebAuthn: () => void;
+  onSwitchToTotp: () => void;
 }
 
 export default function AppGlobalOverlays(props: AppGlobalOverlaysProps) {
@@ -100,6 +107,37 @@ export default function AppGlobalOverlays(props: AppGlobalOverlaysProps) {
           <input className="input" type="password" autoComplete="current-password" value={props.disableTotpPassword} onInput={(e) => props.onDisableTotpPasswordChange((e.currentTarget as HTMLInputElement).value)} />
         </label>
       </ConfirmDialog>
+
+      <ConfirmDialog
+        open={props.pendingWebAuthnOpen}
+        title={t('txt_two_step_verification')}
+        message={t('txt_webauthn_waiting')}
+        confirmText={props.webAuthnSubmitting ? t('txt_webauthn_waiting') : t('txt_webauthn_use_key')}
+        cancelText={t('txt_cancel')}
+        showIcon={false}
+        confirmDisabled={props.webAuthnSubmitting}
+        cancelDisabled={props.webAuthnSubmitting}
+        onConfirm={props.onConfirmWebAuthn}
+        onCancel={props.onCancelWebAuthn}
+        afterActions={props.webAuthnHasTotpFallback ? (
+          <div className="dialog-extra">
+            <div className="dialog-divider" />
+            <button type="button" className="btn btn-secondary dialog-btn" disabled={props.webAuthnSubmitting} onClick={props.onSwitchToTotp}>
+              {t('txt_totp')}
+            </button>
+            <button type="button" className="btn btn-secondary dialog-btn" disabled={props.webAuthnSubmitting} onClick={props.onUseRecoveryCode}>
+              {t('txt_use_recovery_code')}
+            </button>
+          </div>
+        ) : (
+          <div className="dialog-extra">
+            <div className="dialog-divider" />
+            <button type="button" className="btn btn-secondary dialog-btn" disabled={props.webAuthnSubmitting} onClick={props.onUseRecoveryCode}>
+              {t('txt_use_recovery_code')}
+            </button>
+          </div>
+        )}
+      />
 
       <ToastHost toasts={props.toasts} onClose={props.onCloseToast} />
     </>

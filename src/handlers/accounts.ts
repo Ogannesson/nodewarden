@@ -9,6 +9,19 @@ import { LIMITS } from '../config/limits';
 import { isTotpEnabled, verifyTotpToken } from '../utils/totp';
 import { createRecoveryCode, recoveryCodeEquals } from '../utils/recovery-code';
 import { buildAccountKeys } from '../utils/user-decryption';
+import {
+  getTwoFactor,
+  upsertTwoFactor,
+  deleteTwoFactor,
+} from '../services/storage-two-factor-repo';
+import {
+  EMAIL_ENROLLMENT_ATYPE,
+  EMAIL_LOGIN_CHALLENGE_ATYPE,
+  generateNumericCode,
+  maskEmail,
+  CODE_TTL_S,
+} from '../services/two-factor/email-provider';
+import { buildEmailSenderFromEnv } from '../services/email-sender';
 
 // CONTRACT:
 // users.master_password_hash is server-side login verification only. It does
@@ -888,6 +901,440 @@ async function apiKey(request: Request, env: Env, userId: string, rotate: boolea
     revisionDate: user.updatedAt,
     object: 'apiKey',
   });
+}
+
+// ---------------------------------------------------------------------------
+// WebAuthn (FIDO2) management endpoints
+// ---------------------------------------------------------------------------
+
+import {
+  generateRegistrationChallenge,
+  completeRegistration,
+  listCredentials,
+  deleteCredential,
+} from '../services/two-factor/webauthn-provider';
+
+/**
+ * GET /api/two-factor/webauthn
+ * Returns the registration challenge options + list of existing credentials.
+ * Bitwarden-compatible: also accepts GET /api/two-factor/get-webauthn.
+ */
+export async function handleGetWebAuthnChallenge(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  // Master password is required for all 2FA management operations (checklist §5.3).
+  let body: Record<string, string | undefined> = {};
+  try {
+    const contentType = request.headers.get('content-type') || '';
+    if (contentType.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries()) as Record<string, string>;
+    } else if (request.method !== 'GET') {
+      body = await request.json();
+    }
+  } catch { /* ignored for GET */ }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (masterPasswordHash) {
+    const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+    if (!valid) return errorResponse('Invalid password', 400);
+  }
+
+  const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
+  const existingCredentials = listCredentials(twoFactorRows);
+  const options = await generateRegistrationChallenge(env.DB, user, request, existingCredentials);
+
+  return jsonResponse({
+    ...options,
+    keys: existingCredentials.map(c => ({
+      id: c.id,
+      name: c.name,
+      createdAt: c.createdAt,
+    })),
+    object: 'twoFactorWebAuthn',
+  });
+}
+
+/**
+ * POST /api/two-factor/webauthn
+ * Complete WebAuthn credential registration.
+ */
+export async function handleRegisterWebAuthn(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, unknown>;
+  try {
+    const contentType = request.headers.get('content-type') || '';
+    if (contentType.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries()) as Record<string, string>;
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  try {
+    const credential = await completeRegistration(
+      env.DB,
+      user,
+      {
+        id: String(body.id ?? ''),
+        rawId: String(body.rawId ?? body.id ?? ''),
+        type: String(body.type ?? 'public-key'),
+        response: body.response as Record<string, string> | undefined,
+        deviceName: String(body.name ?? body.deviceName ?? ''),
+      },
+      env
+    );
+
+    // Ensure the account has a recovery code now that WebAuthn is enabled.
+    // The recovery code is account-level (not TOTP-specific): it acts as an
+    // escape hatch to disable ALL 2FA providers at once (Bitwarden semantics).
+    if (!user.totpRecoveryCode) {
+      user.totpRecoveryCode = createRecoveryCode();
+      user.updatedAt = new Date().toISOString();
+      await storage.saveUser(user);
+    }
+
+    await safeWriteAuditEvent(env, {
+      actorUserId: userId,
+      action: 'account.webauthn.register',
+      category: 'security',
+      level: 'info',
+      targetType: 'webauthn_credential',
+      targetId: credential.id,
+      metadata: auditRequestMetadata(request),
+    });
+
+    const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
+    const allCredentials = listCredentials(twoFactorRows);
+    return jsonResponse({
+      id: credential.id,
+      name: credential.name,
+      createdAt: credential.createdAt,
+      keys: allCredentials.map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt })),
+      object: 'twoFactorWebAuthn',
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Registration failed';
+    return errorResponse(msg, 400);
+  }
+}
+
+/**
+ * DELETE /api/two-factor/webauthn
+ * Remove a registered WebAuthn credential by ID.
+ */
+export async function handleDeleteWebAuthn(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, string | undefined>;
+  try {
+    const contentType = request.headers.get('content-type') || '';
+    if (contentType.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries()) as Record<string, string>;
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  const credentialId = String(body.id ?? body.credentialId ?? '').trim();
+  if (!credentialId) return errorResponse('credentialId (id) is required', 400);
+
+  const deleted = await deleteCredential(env.DB, userId, credentialId);
+  if (!deleted) return errorResponse('Credential not found', 404);
+
+  await safeWriteAuditEvent(env, {
+    actorUserId: userId,
+    action: 'account.webauthn.delete',
+    category: 'security',
+    level: 'security',
+    targetType: 'webauthn_credential',
+    targetId: credentialId,
+    metadata: auditRequestMetadata(request),
+  });
+
+  const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
+  const remaining = listCredentials(twoFactorRows);
+  return jsonResponse({
+    keys: remaining.map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt })),
+    object: 'twoFactorWebAuthn',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Email 2FA management endpoints (P2)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/two-factor/email
+ * Returns the current Email 2FA status and the masked enrolled email (if any).
+ * Also triggers sending a fresh code to the enrolled email (for setup/verify flow).
+ */
+export async function handleGetEmailTwoFactor(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  const row = await getTwoFactor(env.DB, userId, EMAIL_ENROLLMENT_ATYPE);
+  const enabled = row?.enabled ?? false;
+  const email = enabled && row ? (JSON.parse(row.data) as { email: string }).email : null;
+
+  return jsonResponse({
+    enabled,
+    email: email ? maskEmail(email) : null,
+    object: 'twoFactorEmail',
+  });
+}
+
+/**
+ * POST /api/two-factor/send-email
+ * Already-authenticated user triggers sending a verification code to their email
+ * (used during 2FA enrollment setup flow).
+ *
+ * Body: { email, masterPasswordHash }
+ */
+export async function handleSendEmailSetup(request: Request, env: Env, userId: string): Promise<Response> {
+  if (!env.RESEND_API_KEY || !env.MFA_EMAIL_FROM) {
+    return errorResponse('Email 2FA is not configured on this server', 503);
+  }
+
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, unknown>;
+  try {
+    const ct = request.headers.get('content-type') ?? '';
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries());
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid request body', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  const targetEmail = String(body.email ?? '').trim().toLowerCase();
+  if (!targetEmail || !targetEmail.includes('@')) return errorResponse('Valid email is required', 400);
+
+  // Generate + store challenge.
+  const code = generateNumericCode();
+  await upsertTwoFactor(env.DB, {
+    userId,
+    atype: EMAIL_LOGIN_CHALLENGE_ATYPE,
+    enabled: true,
+    data: JSON.stringify({ code, createdAt: Date.now(), attempts: 0 }),
+    lastUsed: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  // Send code — failure MUST surface.
+  const sender = buildEmailSenderFromEnv(env);
+  if (!sender) return errorResponse('Email sender not configured', 503);
+  try {
+    await sender.send({
+      to: targetEmail,
+      subject: 'Your NodeWarden verification code',
+      text: [
+        `Your NodeWarden verification code is: ${code}`,
+        '',
+        `This code expires in ${CODE_TTL_S / 60} minutes and can only be used once.`,
+        'If you did not request this code, please secure your account immediately.',
+      ].join('\n'),
+    });
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ Message: `Failed to send verification email: ${err instanceof Error ? err.message : String(err)}` }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
+
+/**
+ * PUT /api/two-factor/email
+ * Enable Email 2FA: verify the code sent to the target email, then enroll.
+ *
+ * Body: { email, masterPasswordHash, token }
+ */
+export async function handleEnableEmailTwoFactor(request: Request, env: Env, userId: string): Promise<Response> {
+  if (!env.RESEND_API_KEY || !env.MFA_EMAIL_FROM) {
+    return errorResponse('Email 2FA is not configured on this server', 503);
+  }
+
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, unknown>;
+  try {
+    const ct = request.headers.get('content-type') ?? '';
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries());
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid request body', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  const targetEmail = String(body.email ?? '').trim().toLowerCase();
+  if (!targetEmail || !targetEmail.includes('@')) return errorResponse('Valid email is required', 400);
+
+  const token = String(body.token ?? '').trim();
+  if (!token) return errorResponse('Verification token is required', 400);
+
+  // Verify the pending setup challenge.
+  const challengeRow = await getTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+  if (!challengeRow) return errorResponse('No pending verification code. Please request a new code.', 400);
+
+  const challenge = JSON.parse(challengeRow.data) as { code: string; createdAt: number; attempts: number };
+  const ageMs = Date.now() - challenge.createdAt;
+  if (ageMs > CODE_TTL_S * 1000) {
+    await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    return errorResponse('Verification code has expired. Please request a new code.', 400);
+  }
+
+  // Constant-time comparison.
+  const enc = new TextEncoder();
+  const { timingSafeEqual } = await import('../utils/passkey');
+  const match = await timingSafeEqual(enc.encode(token), enc.encode(challenge.code));
+  if (!match) {
+    const newAttempts = challenge.attempts + 1;
+    if (newAttempts >= 3) {
+      await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    } else {
+      await upsertTwoFactor(env.DB, {
+        ...challengeRow,
+        data: JSON.stringify({ ...challenge, attempts: newAttempts }),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    return errorResponse('Invalid verification code', 400);
+  }
+
+  // Delete the setup challenge and enroll.
+  await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+  await upsertTwoFactor(env.DB, {
+    userId,
+    atype: EMAIL_ENROLLMENT_ATYPE,
+    enabled: true,
+    data: JSON.stringify({ email: targetEmail }),
+    lastUsed: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  // Ensure account-level recovery code exists.
+  if (!user.totpRecoveryCode) {
+    user.totpRecoveryCode = createRecoveryCode();
+    user.updatedAt = new Date().toISOString();
+    await storage.saveUser(user);
+  }
+
+  await safeWriteAuditEvent(env, {
+    actorUserId: userId,
+    action: 'account.email2fa.enable',
+    category: 'security',
+    level: 'security',
+    targetType: 'user',
+    targetId: userId,
+    metadata: auditRequestMetadata(request),
+  });
+
+  return jsonResponse({
+    enabled: true,
+    email: maskEmail(targetEmail),
+    object: 'twoFactorEmail',
+  });
+}
+
+/**
+ * DELETE /api/two-factor/email
+ * Disable Email 2FA for this user.
+ *
+ * Body: { masterPasswordHash }
+ */
+export async function handleDisableEmailTwoFactor(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, unknown>;
+  try {
+    const ct = request.headers.get('content-type') ?? '';
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries());
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid request body', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  await deleteTwoFactor(env.DB, userId, EMAIL_ENROLLMENT_ATYPE);
+  // Also clean up any stale challenge row.
+  await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+
+  await safeWriteAuditEvent(env, {
+    actorUserId: userId,
+    action: 'account.email2fa.disable',
+    category: 'security',
+    level: 'security',
+    targetType: 'user',
+    targetId: userId,
+    metadata: auditRequestMetadata(request),
+  });
+
+  return jsonResponse({ enabled: false, email: null, object: 'twoFactorEmail' });
 }
 
 // Generate a random alphanumeric string of the given length using crypto.getRandomValues.

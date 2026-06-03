@@ -21,6 +21,7 @@ import {
   getTotpStatus,
   saveSession,
   stripProfileSecrets,
+  getWebAuthnChallenge,
 } from '@/lib/api/auth';
 import { clearAuditLogs, getAuditLogSettings, listAdminInvites, listAdminUsers, listAuditLogs, saveAuditLogSettings, type AuditLogFilters } from '@/lib/api/admin';
 import { getDomainRules, saveDomainRules } from '@/lib/api/domains';
@@ -41,11 +42,14 @@ import {
   performRecoverTwoFactorLogin,
   performRegistration,
   performTotpLogin,
+  performWebAuthnLogin,
   hydrateLockedSession,
   performUnlock,
   type JwtUnsafeReason,
   type PendingTotp,
+  type PendingWebAuthn,
 } from '@/lib/app-auth';
+import { performWebAuthnAssertion } from '@/lib/api/auth';
 import useAccountSecurityActions from '@/hooks/useAccountSecurityActions';
 import useAdminActions from '@/hooks/useAdminActions';
 import useBackupActions from '@/hooks/useBackupActions';
@@ -200,6 +204,9 @@ export default function App() {
   const [unlockPassword, setUnlockPassword] = useState('');
   const [pendingTotp, setPendingTotp] = useState<PendingTotp | null>(null);
   const [pendingTotpMode, setPendingTotpMode] = useState<'login' | 'unlock' | null>(null);
+  const [pendingWebAuthn, setPendingWebAuthn] = useState<PendingWebAuthn | null>(null);
+  const [pendingWebAuthnMode, setPendingWebAuthnMode] = useState<'login' | 'unlock' | null>(null);
+  const [webAuthnSubmitting, setWebAuthnSubmitting] = useState(false);
   const [totpCode, setTotpCode] = useState('');
   const [rememberDevice, setRememberDevice] = useState(true);
   const [totpSubmitting, setTotpSubmitting] = useState(false);
@@ -478,6 +485,9 @@ export default function App() {
     setUnlockPreparing(false);
     setPendingTotp(null);
     setPendingTotpMode(null);
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+    setWebAuthnSubmitting(false);
     setTotpCode('');
     setUnlockPassword('');
     setPhase('app');
@@ -525,12 +535,52 @@ export default function App() {
         setRememberDevice(true);
         return;
       }
+      if (result.kind === 'webauthn') {
+        setPendingWebAuthn(result.pendingWebAuthn);
+        setPendingWebAuthnMode('login');
+        return;
+      }
       pushToast('error', result.message || t('txt_login_failed'));
     } catch (error) {
       pushToast('error', error instanceof Error ? error.message : t('txt_login_failed'));
     } finally {
       setPendingAuthAction(null);
     }
+  }
+
+  async function handleWebAuthnVerify() {
+    if (webAuthnSubmitting) return;
+    if (!pendingWebAuthn) return;
+    setWebAuthnSubmitting(true);
+    try {
+      const webAuthnToken = await performWebAuthnAssertion(pendingWebAuthn.webAuthnChallenge);
+      const login = await performWebAuthnLogin(pendingWebAuthn, webAuthnToken, rememberDevice);
+      await finalizeLogin(login, pendingWebAuthnMode === 'unlock' ? t('txt_unlocked') : t('txt_login_success'));
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : t('txt_webauthn_assertion_failed'));
+    } finally {
+      setWebAuthnSubmitting(false);
+    }
+  }
+
+  function cancelWebAuthn() {
+    if (webAuthnSubmitting) return;
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+  }
+
+  function switchWebAuthnToTotp() {
+    if (!pendingWebAuthn) return;
+    setPendingTotp({
+      email: pendingWebAuthn.email,
+      passwordHash: pendingWebAuthn.passwordHash,
+      masterKey: pendingWebAuthn.masterKey,
+    });
+    setPendingTotpMode(pendingWebAuthnMode);
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+    setTotpCode('');
+    setRememberDevice(true);
   }
 
   async function handleTotpVerify() {
@@ -707,6 +757,11 @@ export default function App() {
         setRememberDevice(true);
         return;
       }
+      if (result.kind === 'webauthn') {
+        setPendingWebAuthn(result.pendingWebAuthn);
+        setPendingWebAuthnMode('unlock');
+        return;
+      }
       pushToast('error', result.message || t('txt_unlock_failed_master_password_is_incorrect'));
     } catch {
       pushToast('error', t('txt_unlock_failed_master_password_is_incorrect'));
@@ -729,6 +784,9 @@ export default function App() {
     setUnlockPassword('');
     setPendingTotp(null);
     setPendingTotpMode(null);
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+    setWebAuthnSubmitting(false);
     setTotpCode('');
     setUnlockPreparing(false);
     setPhase('locked');
@@ -750,6 +808,9 @@ export default function App() {
     setUnlockPreparing(false);
     setPendingTotp(null);
     setPendingTotpMode(null);
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+    setWebAuthnSubmitting(false);
     setPhase('login');
     navigate('/login');
   }
@@ -843,6 +904,12 @@ export default function App() {
         onConfirmDisableTotp={() => {}}
         onCancelDisableTotp={() => {}}
         disableTotpSubmitting={false}
+        pendingWebAuthnOpen={false}
+        webAuthnSubmitting={false}
+        webAuthnHasTotpFallback={false}
+        onConfirmWebAuthn={() => {}}
+        onCancelWebAuthn={() => {}}
+        onSwitchToTotp={() => {}}
       />
     );
   }
@@ -968,6 +1035,15 @@ export default function App() {
   const authorizedDevicesQuery = useQuery({
     queryKey: ['authorized-devices', vaultCacheKey || session?.email],
     queryFn: () => getAuthorizedDevices(authedFetch),
+    enabled: !IS_DEMO_MODE && phase === 'app' && !!session?.accessToken && vaultInitialDecryptDone,
+    staleTime: 30_000,
+  });
+  const webAuthnKeysQuery = useQuery({
+    queryKey: ['webauthn-keys', vaultCacheKey || session?.email],
+    queryFn: async () => {
+      const data = await getWebAuthnChallenge(authedFetch);
+      return data.keys ?? [];
+    },
     enabled: !IS_DEMO_MODE && phase === 'app' && !!session?.accessToken && vaultInitialDecryptDone,
     staleTime: 30_000,
   });
@@ -1362,6 +1438,7 @@ export default function App() {
     onSetConfirm: setConfirm,
     refetchTotpStatus: totpStatusQuery.refetch,
     refetchAuthorizedDevices: authorizedDevicesQuery.refetch,
+    refetchWebAuthnKeys: webAuthnKeysQuery.refetch,
   });
   const adminActions = useAdminActions({
     authedFetch,
@@ -1549,6 +1626,10 @@ export default function App() {
     onRemoveDevice: accountSecurityActions.openRemoveDevice,
     onRevokeAllDeviceTrust: accountSecurityActions.openRevokeAllDeviceTrust,
     onRemoveAllDevices: accountSecurityActions.openRemoveAllDevices,
+    webAuthnKeys: webAuthnKeysQuery.data || [],
+    webAuthnKeysLoading: webAuthnKeysQuery.isFetching && !webAuthnKeysQuery.data,
+    onRegisterWebAuthnKey: accountSecurityActions.registerWebAuthnKey,
+    onDeleteWebAuthnKey: accountSecurityActions.deleteWebAuthnKey,
     onRefreshAdmin: adminActions.refreshAdmin,
     onCreateInvite: adminActions.createInvite,
     onDeleteAllInvites: adminActions.deleteAllInvites,
@@ -1695,9 +1776,12 @@ export default function App() {
             setRememberDevice(true);
           }}
           onUseRecoveryCode={() => {
-            if (totpSubmitting) return;
+            if (totpSubmitting || webAuthnSubmitting) return;
             setPendingTotp(null);
             setPendingTotpMode(null);
+            setPendingWebAuthn(null);
+            setPendingWebAuthnMode(null);
+            setWebAuthnSubmitting(false);
             setTotpCode('');
             setRememberDevice(true);
             navigate('/recover-2fa');
@@ -1709,6 +1793,12 @@ export default function App() {
           onConfirmDisableTotp={() => {}}
           onCancelDisableTotp={() => {}}
           disableTotpSubmitting={false}
+          pendingWebAuthnOpen={!!pendingWebAuthn}
+          webAuthnSubmitting={webAuthnSubmitting}
+          webAuthnHasTotpFallback={pendingWebAuthn?.hasTotpFallback ?? false}
+          onConfirmWebAuthn={() => void handleWebAuthnVerify()}
+          onCancelWebAuthn={cancelWebAuthn}
+          onSwitchToTotp={switchWebAuthnToTotp}
         />
       </>
     );
@@ -1769,6 +1859,12 @@ export default function App() {
           setDisableTotpPassword('');
         }}
         disableTotpSubmitting={disableTotpSubmitting}
+        pendingWebAuthnOpen={false}
+        webAuthnSubmitting={false}
+        webAuthnHasTotpFallback={false}
+        onConfirmWebAuthn={() => {}}
+        onCancelWebAuthn={() => {}}
+        onSwitchToTotp={() => {}}
       />
     </>
   );

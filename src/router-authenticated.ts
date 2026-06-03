@@ -13,6 +13,13 @@ import {
   handleGetTotpRecoveryCode,
   handleGetApiKey,
   handleRotateApiKey,
+  handleGetWebAuthnChallenge,
+  handleRegisterWebAuthn,
+  handleDeleteWebAuthn,
+  handleGetEmailTwoFactor,
+  handleSendEmailSetup,
+  handleEnableEmailTwoFactor,
+  handleDisableEmailTwoFactor,
 } from './handlers/accounts';
 import {
   handleGetCiphers,
@@ -109,6 +116,28 @@ export async function handleAuthenticatedRoute(
 
   if ((path === '/api/accounts/totp/recovery-code' || path === '/api/two-factor/get-recover') && method === 'POST') {
     return handleGetTotpRecoveryCode(request, env, userId);
+  }
+
+  // WebAuthn (FIDO2) management endpoints — Bitwarden-compatible /api/two-factor/webauthn
+  if (path === '/api/two-factor/webauthn' || path === '/api/two-factor/get-webauthn') {
+    if (method === 'GET' || method === 'POST' && path === '/api/two-factor/get-webauthn') {
+      return handleGetWebAuthnChallenge(request, env, userId);
+    }
+    if (method === 'POST') return handleRegisterWebAuthn(request, env, userId);
+    if (method === 'DELETE') return handleDeleteWebAuthn(request, env, userId);
+    return null;
+  }
+
+  // Email 2FA management endpoints (P2)
+  if (path === '/api/two-factor/email' || path === '/api/two-factor/get-email') {
+    if (method === 'GET') return handleGetEmailTwoFactor(request, env, userId);
+    if (method === 'PUT' || method === 'POST') return handleEnableEmailTwoFactor(request, env, userId);
+    if (method === 'DELETE') return handleDisableEmailTwoFactor(request, env, userId);
+    return null;
+  }
+  // Authenticated send-email (setup flow): POST /api/two-factor/send-email
+  if (path === '/api/two-factor/send-email' && method === 'POST') {
+    return handleSendEmailSetup(request, env, userId);
   }
 
   if (path === '/api/accounts/revision-date' && method === 'GET') {

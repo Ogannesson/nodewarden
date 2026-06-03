@@ -4,7 +4,6 @@ import { AuthService } from '../services/auth';
 import { RateLimitService, getClientIdentifier } from '../services/ratelimit';
 import { jsonResponse, errorResponse, identityErrorResponse } from '../utils/response';
 import { LIMITS } from '../config/limits';
-import { isTotpEnabled, verifyTotpToken } from '../utils/totp';
 import { createRefreshToken } from '../utils/jwt';
 import { readAuthRequestDeviceInfo } from '../utils/device';
 import { createRecoveryCode, recoveryCodeEquals } from '../utils/recovery-code';
@@ -15,9 +14,23 @@ import {
   buildUserDecryptionOptions,
 } from '../utils/user-decryption';
 import { auditRequestMetadata, safeWriteAuditEvent } from '../services/audit-events';
+import { getAvailableProviders, getProvider } from '../services/two-factor/registry';
+import { TwoFactorType } from '../services/two-factor/types';
+import type { TwoFactorProvider } from '../services/two-factor/types';
+import {
+  getTwoFactor,
+  upsertTwoFactor,
+} from '../services/storage-two-factor-repo';
+import {
+  EMAIL_ENROLLMENT_ATYPE,
+  EMAIL_LOGIN_CHALLENGE_ATYPE,
+  generateNumericCode,
+  maskEmail,
+  CODE_TTL_S,
+} from '../services/two-factor/email-provider';
+import { buildEmailSenderFromEnv } from '../services/email-sender';
 
 const TWO_FACTOR_REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const TWO_FACTOR_PROVIDER_AUTHENTICATOR = 0;
 const TWO_FACTOR_PROVIDER_REMEMBER = 5;
 const WEB_REFRESH_COOKIE = 'nodewarden_web_refresh';
 // Android client (2026.2.x) deserializes TwoFactorProviders2 keys with -1 for recovery code.
@@ -25,13 +38,6 @@ const WEB_REFRESH_COOKIE = 'nodewarden_web_refresh';
 const TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE = '-1';
 const TWO_FACTOR_PROVIDER_RECOVERY_CODE_LEGACY = 8;
 const TWO_FACTOR_PROVIDER_RECOVERY_CODE_ANDROID_REQUEST = 100;
-
-function resolveTotpSecret(userSecret: string | null): string | null {
-  if (userSecret && isTotpEnabled(userSecret)) {
-    return userSecret;
-  }
-  return null;
-}
 
 async function resolveDeviceSession(
   storage: StorageService,
@@ -126,19 +132,41 @@ function buildPreloginResponse(
   };
 }
 
-function twoFactorRequiredResponse(message: string = 'Two factor required.', includeRecoveryCode: boolean = false): Response {
-  const providers = includeRecoveryCode
-    ? [String(TWO_FACTOR_PROVIDER_AUTHENTICATOR), TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE]
-    : [String(TWO_FACTOR_PROVIDER_AUTHENTICATOR)];
-  const providers2: Record<string, null> = {};
-  for (const provider of providers) providers2[provider] = null;
+/**
+ * Build the 2FA challenge response (HTTP 400 invalid_grant).
+ *
+ * `enabledProviders` is the list of providers that are active for this user
+ * (already filtered by isAvailable + isEnabledForUser).
+ * `challengeData` maps provider type → the value for TwoFactorProviders2[type]
+ * (null for Authenticator, an options-object for WebAuthn, etc.).
+ * `includeRecoveryCode` appends the -1 recovery-code entry when the user has one.
+ */
+function twoFactorRequiredResponse(
+  enabledProviders: TwoFactorProvider[],
+  challengeData: Map<number, unknown>,
+  message: string = 'Two factor required.',
+  includeRecoveryCode: boolean = false
+): Response {
+  // Build TwoFactorProviders list (string keys, matching Bitwarden protocol).
+  const providerKeys: string[] = enabledProviders.map(p => String(p.type));
+  if (includeRecoveryCode) {
+    providerKeys.push(TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE);
+  }
+
+  // Build TwoFactorProviders2 map (type string → challenge payload or null).
+  const providers2: Record<string, unknown> = {};
+  for (const p of enabledProviders) {
+    providers2[String(p.type)] = challengeData.get(p.type) ?? null;
+  }
+  if (includeRecoveryCode) {
+    providers2[TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE] = null;
+  }
+
   const customResponse = {
-    TwoFactorProviders: providers,
+    TwoFactorProviders: providerKeys,
     TwoFactorProviders2: providers2,
     SsoEmail2faSessionToken: null,
-    MasterPasswordPolicy: {
-      Object: 'masterPasswordPolicy',
-    },
+    MasterPasswordPolicy: { Object: 'masterPasswordPolicy' },
   };
 
   // Bitwarden clients rely on these fields to trigger the 2FA UI flow.
@@ -290,10 +318,20 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
       );
     }
 
-    // Optional 2FA: enabled only by per-user secret.
+    // Optional 2FA: driven by provider registry + legacy TOTP column (conservative dual-track).
     let trustedTwoFactorTokenToReturn: string | undefined;
-    const effectiveTotpSecret = resolveTotpSecret(user.totpSecret);
-    if (effectiveTotpSecret) {
+
+    // Fetch two_factors rows for this user (for WebAuthn/Email/YubiKey providers in future phases).
+    // TOTP uses users.totp_secret (legacy column) directly inside TotpTwoFactorProvider.
+    const twoFactorRows = await storage.getTwoFactorsByUserId(user.id);
+
+    // Determine which providers are enabled for this user.
+    const availableProviders = getAvailableProviders(env);
+    const enabledProviders = availableProviders.filter(p => p.isEnabledForUser(user, twoFactorRows));
+
+    if (enabledProviders.length > 0) {
+      // Recovery code is account-level, not TOTP-specific: any user with at least one
+      // 2FA provider enabled can use their recovery code to disable all 2FA at once.
       const canUseRecoveryCode = !!user.totpRecoveryCode;
       const normalizedTwoFactorProvider = String(twoFactorProvider ?? '').trim();
       const normalizedTwoFactorToken = String(twoFactorToken ?? '').trim();
@@ -302,9 +340,14 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
       const hasToken = normalizedTwoFactorToken.length > 0;
 
       // Upstream-compatible behavior: if 2FA is required and either provider or token is missing,
-      // respond with a 2FA challenge payload.
+      // respond with a 2FA challenge payload driven by the enabled-providers list.
       if (!hasProvider || !hasToken) {
-        return twoFactorRequiredResponse('Two factor required.', canUseRecoveryCode);
+        const challengeCtx = { user, env, db: env.DB, twoFactorRows, request };
+        const challengeData = new Map<number, unknown>();
+        for (const p of enabledProviders) {
+          challengeData.set(p.type, await p.buildChallenge(challengeCtx));
+        }
+        return twoFactorRequiredResponse(enabledProviders, challengeData, 'Two factor required.', canUseRecoveryCode);
       }
 
       let passedByRememberToken = false;
@@ -319,30 +362,51 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
 
         // Remember token missing/invalid/expired should re-enter the 2FA challenge flow.
         if (!passedByRememberToken) {
-          return twoFactorRequiredResponse('Two factor required.', canUseRecoveryCode);
-        }
-      } else if (normalizedTwoFactorProvider === String(TWO_FACTOR_PROVIDER_AUTHENTICATOR)) {
-        const totpOk = await verifyTotpToken(effectiveTotpSecret, normalizedTwoFactorToken);
-        if (!totpOk) {
-          return recordFailedTwoFactorAndBuildResponse(rateLimit, loginIdentifier);
+          const challengeCtx = { user, env, db: env.DB, twoFactorRows, request };
+          const challengeData = new Map<number, unknown>();
+          for (const p of enabledProviders) {
+            challengeData.set(p.type, await p.buildChallenge(challengeCtx));
+          }
+          return twoFactorRequiredResponse(enabledProviders, challengeData, 'Two factor required.', canUseRecoveryCode);
         }
       } else if (
         normalizedTwoFactorProvider === TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE ||
         normalizedTwoFactorProvider === String(TWO_FACTOR_PROVIDER_RECOVERY_CODE_LEGACY) ||
         normalizedTwoFactorProvider === String(TWO_FACTOR_PROVIDER_RECOVERY_CODE_ANDROID_REQUEST)
       ) {
+        // Recovery code is the account-level "escape hatch": it disables ALL 2FA
+        // providers at once (TOTP + WebAuthn + Email + YubiKey), matching Bitwarden
+        // semantics. The recovery code is then rotated so it can only be used once.
         if (!recoveryCodeEquals(normalizedTwoFactorToken, user.totpRecoveryCode)) {
           return recordFailedTwoFactorAndBuildResponse(rateLimit, loginIdentifier);
         }
+        // Disable TOTP (legacy column).
         user.totpSecret = null;
+        // Rotate recovery code immediately (one-time use).
         user.totpRecoveryCode = createRecoveryCode();
         user.updatedAt = new Date().toISOString();
         await storage.saveUser(user);
+        // Disable all non-TOTP 2FA providers stored in two_factors table.
+        await storage.deleteAllTwoFactorsByUserId(user.id);
         await storage.deleteRefreshTokensByUserId(user.id);
         rememberRequested = false;
       } else {
-        // Unsupported provider for this server profile behaves as an invalid 2FA attempt.
-        return recordFailedTwoFactorAndBuildResponse(rateLimit, loginIdentifier);
+        // Dispatch to the provider identified by twoFactorProvider.
+        const providerType = Number(normalizedTwoFactorProvider);
+        const provider = Number.isFinite(providerType)
+          ? getProvider(providerType, env)
+          : null;
+
+        if (!provider || !provider.isEnabledForUser(user, twoFactorRows)) {
+          // Unknown or not-enabled provider → treat as invalid 2FA attempt.
+          return recordFailedTwoFactorAndBuildResponse(rateLimit, loginIdentifier);
+        }
+
+        const verifyCtx = { user, env, db: env.DB, twoFactorRows, request };
+        const ok = await provider.verify(verifyCtx, normalizedTwoFactorToken);
+        if (!ok) {
+          return recordFailedTwoFactorAndBuildResponse(rateLimit, loginIdentifier);
+        }
       }
 
       // Upstream behavior: do not issue a new remember token when auth itself used remember provider.
@@ -771,4 +835,124 @@ export function checkClientCredentialsParam(clientId: string, clientSecret: stri
     return false;
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/two-factor/send-email-login (P2 Email 2FA)
+// ---------------------------------------------------------------------------
+
+/**
+ * Unauthenticated endpoint: 2025.5+ clients call this during the login 2FA
+ * challenge to trigger sending a fresh verification code.
+ *
+ * Security:
+ *  - Requires masterPasswordHash to prevent arbitrary code triggers.
+ *  - Always returns 200 regardless of whether the user/email exists (anti-enumeration).
+ *  - Rate-limited via the standard login rate-limit bucket.
+ *  - Send failures are logged but the caller receives HTTP 500 (explicit, not silent).
+ */
+export async function handleSendEmailLogin(request: Request, env: Env): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const rateLimit = new RateLimitService(env.DB);
+  const clientId = getClientIdentifier(request);
+
+  // Rate limit check (reuse login bucket).
+  if (clientId) {
+    const rl = await rateLimit.checkLoginAttempt(clientId);
+    if (!rl.allowed) {
+      // Anti-enumeration: still 200, but don't send.
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+  }
+
+  let body: Record<string, unknown> = {};
+  try {
+    const ct = request.headers.get('content-type') ?? '';
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries());
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    // Silently treat malformed body as missing credentials.
+  }
+
+  const email = String(body.email ?? body.Email ?? '').trim().toLowerCase();
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.MasterPasswordHash ?? '').trim();
+
+  // Always return 200 for unknown email (anti-enumeration).
+  if (!email || !masterPasswordHash) {
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  const user = await storage.getUser(email);
+  if (!user) {
+    // Anti-enumeration: don't reveal whether the email exists.
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  // Validate master password hash — prevents arbitrary triggering for other users' emails.
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) {
+    if (clientId) {
+      await rateLimit.recordFailedLogin(clientId);
+    }
+    // Anti-enumeration: still 200 on bad password.
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  // Look up the enrolled email address.
+  const enrollmentRow = await getTwoFactor(env.DB, user.id, EMAIL_ENROLLMENT_ATYPE);
+  if (!enrollmentRow?.enabled) {
+    // Email 2FA not enrolled — return 200 (anti-enumeration, provider may be in challenge
+    // list only because env is configured and some other flow is in progress).
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+  const targetEmail = (JSON.parse(enrollmentRow.data) as { email: string }).email;
+
+  // Check sender is configured before writing anything to DB.
+  // Avoids leaving an orphan challenge row when the sender is not available.
+  const sender = buildEmailSenderFromEnv(env);
+  if (!sender) {
+    return new Response(
+      JSON.stringify({ Message: 'Email sender not configured on this server' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  // Generate + store challenge (only after confirming sender is ready).
+  const code = generateNumericCode();
+  await upsertTwoFactor(env.DB, {
+    userId: user.id,
+    atype: EMAIL_LOGIN_CHALLENGE_ATYPE,
+    enabled: true,
+    data: JSON.stringify({ code, createdAt: Date.now(), attempts: 0 }),
+    lastUsed: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  // Send code — failures are surfaced as 500 (not silently swallowed).
+  try {
+    await sender.send({
+      to: targetEmail,
+      subject: 'Your NodeWarden verification code',
+      text: [
+        `Your NodeWarden verification code is: ${code}`,
+        '',
+        `This code expires in ${CODE_TTL_S / 60} minutes and can only be used once.`,
+        'If you did not request this code, please secure your account immediately.',
+      ].join('\n'),
+    });
+  } catch (err) {
+    // Explicit failure — never swallow.
+    return new Response(
+      JSON.stringify({ Message: `Failed to send verification email: ${err instanceof Error ? err.message : String(err)}` }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
 }

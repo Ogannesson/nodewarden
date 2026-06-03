@@ -26,7 +26,8 @@ type BackupTableName =
   | 'user_revisions'
   | 'folders'
   | 'ciphers'
-  | 'attachments';
+  | 'attachments'
+  | 'two_factors';
 
 const BACKUP_TABLES: BackupTableName[] = [
   'config',
@@ -36,6 +37,7 @@ const BACKUP_TABLES: BackupTableName[] = [
   'folders',
   'ciphers',
   'attachments',
+  'two_factors',
 ];
 
 function shadowTableName(table: BackupTableName): string {
@@ -53,6 +55,7 @@ export interface BackupImportResultBody {
     ciphers: number;
     attachments: number;
     attachmentFiles: number;
+    twoFactors: number;
   };
   skipped: {
     reason: string | null;
@@ -166,6 +169,7 @@ async function ensureImportTargetIsFresh(db: D1Database): Promise<void> {
 function buildResetImportTargetStatements(db: D1Database): D1PreparedStatement[] {
   return [
     'DELETE FROM attachments',
+    'DELETE FROM two_factors',
     'DELETE FROM ciphers',
     'DELETE FROM folders',
     'DELETE FROM domain_settings',
@@ -649,6 +653,19 @@ async function importBackupRows(db: D1Database, payload: BackupPayload['db'], us
     tableName('attachments'),
     buildInsertStatements(db, tableName('attachments'), ['id', 'cipher_id', 'file_name', 'size', 'size_name', 'key'], payload.attachments || [])
   );
+  // two_factors is optional in the payload (older backups won't have it).
+  if (payload.two_factors && payload.two_factors.length > 0) {
+    await runInsertBatch(
+      db,
+      tableName('two_factors'),
+      buildInsertStatements(
+        db,
+        tableName('two_factors'),
+        ['user_id', 'atype', 'enabled', 'data', 'last_used', 'created_at', 'updated_at'],
+        payload.two_factors
+      )
+    );
+  }
 }
 
 export async function importBackupArchiveBytes(
@@ -763,6 +780,7 @@ export async function importBackupArchiveBytes(
           ciphers: (db.ciphers || []).length,
           attachments: restored.restoredAttachments.length,
           attachmentFiles: restored.imported,
+          twoFactors: (db.two_factors || []).length,
         },
         skipped: {
           reason: restored.skipped.reason || prepared.skipped.reason,
@@ -907,6 +925,7 @@ export async function importRemoteBackupArchiveBytes(
           ciphers: (db.ciphers || []).length,
           attachments: restored.restoredAttachments.length,
           attachmentFiles: restored.imported,
+          twoFactors: (db.two_factors || []).length,
         },
         skipped: {
           reason: finalSkippedReason,

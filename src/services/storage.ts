@@ -112,6 +112,15 @@ import {
   updateRevisionDate as updateStoredRevisionDate,
 } from './storage-revision-repo';
 import {
+  type TwoFactorRow,
+  deleteAllTwoFactorsByUserId as deleteStoredAllTwoFactors,
+  deleteTwoFactor as deleteStoredTwoFactor,
+  getTwoFactor as findStoredTwoFactor,
+  getTwoFactorsByUserId as listStoredTwoFactors,
+  touchTwoFactorLastUsed as touchStoredTwoFactorLastUsed,
+  upsertTwoFactor as upsertStoredTwoFactor,
+} from './storage-two-factor-repo';
+import {
   getUserDomainSettings as getStoredUserDomainSettings,
   saveUserDomainSettings as saveStoredUserDomainSettings,
 } from './storage-domain-rules-repo';
@@ -122,7 +131,7 @@ const STORAGE_SCHEMA_VERSION_KEY = 'schema.version';
 // Bump this whenever src/services/storage-schema.ts or migrations/0001_init.sql
 // changes. Existing D1 installs only rerun ensureStorageSchema() when this value
 // differs from config.schema.version.
-const STORAGE_SCHEMA_VERSION = '2026-05-14-lightweight-audit-logs';
+const STORAGE_SCHEMA_VERSION = '2026-06-03-two-factors';
 
 // D1-backed storage.
 // Contract:
@@ -690,5 +699,32 @@ export class StorageService {
       StorageService.lastAttachmentTokenCleanupAt = result.cleanedUpAt;
     }
     return result.consumed;
+  }
+
+  // --- Two-factor providers (non-TOTP: WebAuthn, Email, YubiKey…) ---
+  // TOTP continues to use users.totp_secret (conservative dual-track).
+
+  async getTwoFactorsByUserId(userId: string): Promise<TwoFactorRow[]> {
+    return listStoredTwoFactors(this.db, userId);
+  }
+
+  async getTwoFactor(userId: string, atype: number): Promise<TwoFactorRow | null> {
+    return findStoredTwoFactor(this.db, userId, atype);
+  }
+
+  async upsertTwoFactor(row: TwoFactorRow): Promise<void> {
+    await upsertStoredTwoFactor(this.db, row);
+  }
+
+  async deleteTwoFactor(userId: string, atype: number): Promise<boolean> {
+    return deleteStoredTwoFactor(this.db, userId, atype);
+  }
+
+  async deleteAllTwoFactorsByUserId(userId: string): Promise<number> {
+    return deleteStoredAllTwoFactors(this.db, userId);
+  }
+
+  async touchTwoFactorLastUsed(userId: string, atype: number, nowMs: number = Date.now()): Promise<void> {
+    await touchStoredTwoFactorLastUsed(this.db, userId, atype, nowMs);
   }
 }

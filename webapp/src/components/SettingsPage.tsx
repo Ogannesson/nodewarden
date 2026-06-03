@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
-import { Clipboard, KeyRound, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-preact';
+import { Clipboard, KeyRound, RefreshCw, ShieldCheck, ShieldOff, Trash2, UsbIcon } from 'lucide-preact';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import qrcode from 'qrcode-generator';
 import type { Profile } from '@/lib/types';
 import { AVAILABLE_LOCALES, getLocale, setLocale, t, type Locale } from '@/lib/i18n';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import type { WebAuthnKeyInfo } from '@/lib/api/auth';
 
 interface SettingsPageProps {
   profile: Profile;
@@ -21,6 +22,10 @@ interface SettingsPageProps {
   onLockTimeoutChange: (minutes: 0 | 1 | 5 | 15 | 30) => void;
   onSessionTimeoutActionChange: (action: 'lock' | 'logout') => void;
   onNotify?: (type: 'success' | 'error', text: string) => void;
+  webAuthnKeys?: WebAuthnKeyInfo[];
+  webAuthnKeysLoading?: boolean;
+  onRegisterWebAuthnKey?: (masterPassword: string, keyName: string) => Promise<WebAuthnKeyInfo[]>;
+  onDeleteWebAuthnKey?: (masterPassword: string, keyId: string) => Promise<void>;
 }
 
 const LOCK_TIMEOUT_OPTIONS = [
@@ -80,6 +85,16 @@ export default function SettingsPage(props: SettingsPageProps) {
   const [masterPasswordPromptValue, setMasterPasswordPromptValue] = useState('');
   const [masterPasswordPromptSubmitting, setMasterPasswordPromptSubmitting] = useState(false);
   const [selectedLocale, setSelectedLocale] = useState<Locale>(() => getLocale());
+
+  // WebAuthn state
+  const [webAuthnKeyName, setWebAuthnKeyName] = useState('');
+  const [webAuthnRegistering, setWebAuthnRegistering] = useState(false);
+  const [webAuthnMasterPasswordPrompt, setWebAuthnMasterPasswordPrompt] = useState<null | 'register' | 'delete'>(null);
+  const [webAuthnMasterPasswordValue, setWebAuthnMasterPasswordValue] = useState('');
+  const [webAuthnMasterPasswordSubmitting, setWebAuthnMasterPasswordSubmitting] = useState(false);
+  const [webAuthnDeleteKeyId, setWebAuthnDeleteKeyId] = useState<string | null>(null);
+  const [webAuthnDeleteKeyName, setWebAuthnDeleteKeyName] = useState('');
+  const webAuthnSupported = typeof window !== 'undefined' && !!(window.PublicKeyCredential);
 
   useEffect(() => {
     clearLegacyTotpSetupSecrets();
@@ -173,6 +188,54 @@ export default function SettingsPage(props: SettingsPageProps) {
     setSelectedLocale(next);
     await setLocale(next);
     window.location.reload();
+  }
+
+  function openWebAuthnMasterPasswordPrompt(action: 'register'): void;
+  function openWebAuthnMasterPasswordPrompt(action: 'delete', keyId: string, keyName: string): void;
+  function openWebAuthnMasterPasswordPrompt(action: 'register' | 'delete', keyId?: string, keyName?: string): void {
+    setWebAuthnMasterPasswordPrompt(action);
+    setWebAuthnMasterPasswordValue('');
+    if (action === 'delete') {
+      setWebAuthnDeleteKeyId(keyId ?? null);
+      setWebAuthnDeleteKeyName(keyName ?? '');
+    }
+  }
+
+  function closeWebAuthnMasterPasswordPrompt(): void {
+    if (webAuthnMasterPasswordSubmitting) return;
+    setWebAuthnMasterPasswordPrompt(null);
+    setWebAuthnMasterPasswordValue('');
+    setWebAuthnDeleteKeyId(null);
+    setWebAuthnDeleteKeyName('');
+  }
+
+  async function submitWebAuthnMasterPassword(): Promise<void> {
+    if (!webAuthnMasterPasswordPrompt || webAuthnMasterPasswordSubmitting) return;
+    const masterPassword = webAuthnMasterPasswordValue;
+    setWebAuthnMasterPasswordSubmitting(true);
+    try {
+      if (webAuthnMasterPasswordPrompt === 'register') {
+        setWebAuthnRegistering(true);
+        try {
+          await props.onRegisterWebAuthnKey?.(masterPassword, webAuthnKeyName);
+          props.onNotify?.('success', t('txt_webauthn_register_success'));
+          setWebAuthnKeyName('');
+        } finally {
+          setWebAuthnRegistering(false);
+        }
+      } else if (webAuthnMasterPasswordPrompt === 'delete' && webAuthnDeleteKeyId) {
+        await props.onDeleteWebAuthnKey?.(masterPassword, webAuthnDeleteKeyId);
+        props.onNotify?.('success', t('txt_webauthn_delete_success'));
+      }
+      setWebAuthnMasterPasswordPrompt(null);
+      setWebAuthnMasterPasswordValue('');
+      setWebAuthnDeleteKeyId(null);
+      setWebAuthnDeleteKeyName('');
+    } catch (error) {
+      props.onNotify?.('error', error instanceof Error ? error.message : t('txt_webauthn_register_failed'));
+    } finally {
+      setWebAuthnMasterPasswordSubmitting(false);
+    }
   }
 
   return (
@@ -345,6 +408,77 @@ export default function SettingsPage(props: SettingsPageProps) {
         </div>
       </section>
 
+      <section className="card settings-module">
+        <div className="settings-module-head">
+          <h3>{t('txt_webauthn')}</h3>
+          {(props.webAuthnKeys ?? []).length > 0 && (
+            <span className="totp-status-pill">
+              <ShieldCheck size={14} aria-hidden="true" />
+              {t('txt_webauthn_enabled')}
+            </span>
+          )}
+        </div>
+
+        {!webAuthnSupported && (
+          <p className="muted-inline settings-field-note">{t('txt_webauthn_not_supported')}</p>
+        )}
+
+        {webAuthnSupported && (
+          <>
+            {(props.webAuthnKeys ?? []).length > 0 && (
+              <div className="webauthn-keys-list">
+                <div className="field-label">{t('txt_webauthn_keys')}</div>
+                {(props.webAuthnKeys ?? []).map((key) => (
+                  <div key={key.id} className="webauthn-key-row">
+                    <div className="webauthn-key-info">
+                      <UsbIcon size={14} className="webauthn-key-icon" aria-hidden="true" />
+                      <span className="webauthn-key-name">{key.name}</span>
+                      <span className="webauthn-key-date muted-inline">
+                        {t('txt_webauthn_created_at', { date: formatDateTime(key.createdAt) })}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-danger small"
+                      onClick={() => openWebAuthnMasterPasswordPrompt('delete', key.id, key.name)}
+                    >
+                      <Trash2 size={12} className="btn-icon" />
+                      {t('txt_webauthn_delete_key')}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {(props.webAuthnKeys ?? []).length === 0 && !props.webAuthnKeysLoading && (
+              <p className="muted-inline settings-field-note">{t('txt_webauthn_no_keys')}</p>
+            )}
+
+            <div className="webauthn-add-section">
+              <label className="field">
+                <span>{t('txt_webauthn_key_name')}</span>
+                <input
+                  className="input"
+                  value={webAuthnKeyName}
+                  placeholder={t('txt_webauthn_key_name_placeholder')}
+                  onInput={(e) => setWebAuthnKeyName((e.currentTarget as HTMLInputElement).value)}
+                  disabled={webAuthnRegistering}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={webAuthnRegistering || !props.onRegisterWebAuthnKey}
+                onClick={() => openWebAuthnMasterPasswordPrompt('register')}
+              >
+                <ShieldCheck size={14} className="btn-icon" />
+                {webAuthnRegistering ? t('txt_webauthn_registering') : t('txt_webauthn_add_key')}
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+
       <section className="settings-module sensitive-actions-module">
         <div className="sensitive-actions-grid">
           <div className="sensitive-action">
@@ -475,6 +609,36 @@ export default function SettingsPage(props: SettingsPageProps) {
         }}
         onCancel={() => setRotateApiKeyConfirmOpen(false)}
       />
+      <ConfirmDialog
+        open={webAuthnMasterPasswordPrompt !== null}
+        title={webAuthnMasterPasswordPrompt === 'delete'
+          ? t('txt_webauthn_delete_key_confirm_title')
+          : t('txt_webauthn_add_key')}
+        message={webAuthnMasterPasswordPrompt === 'delete'
+          ? t('txt_webauthn_delete_key_confirm_msg', { name: webAuthnDeleteKeyName })
+          : t('txt_enter_master_password_to_continue')}
+        confirmText={webAuthnMasterPasswordPrompt === 'delete' ? t('txt_webauthn_delete_key') : t('txt_continue')}
+        cancelText={t('txt_cancel')}
+        danger={webAuthnMasterPasswordPrompt === 'delete'}
+        confirmDisabled={webAuthnMasterPasswordSubmitting || !webAuthnMasterPasswordValue.trim()}
+        cancelDisabled={webAuthnMasterPasswordSubmitting}
+        onConfirm={() => void submitWebAuthnMasterPassword()}
+        onCancel={closeWebAuthnMasterPasswordPrompt}
+      >
+        <label className="field">
+          <span>{t('txt_master_password')}</span>
+          <input
+            className="input"
+            type="password"
+            autoComplete="current-password"
+            value={webAuthnMasterPasswordValue}
+            onInput={(e) => setWebAuthnMasterPasswordValue((e.currentTarget as HTMLInputElement).value)}
+          />
+        </label>
+        {webAuthnMasterPasswordPrompt === 'register' && webAuthnRegistering && (
+          <p className="muted-inline">{t('txt_webauthn_registering')}</p>
+        )}
+      </ConfirmDialog>
     </div>
   );
 }

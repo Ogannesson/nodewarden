@@ -231,6 +231,8 @@ export async function loginWithPassword(
   passwordHash: string,
   options?: {
     totpCode?: string;
+    /** Pre-serialised WebAuthn assertion JSON string (twoFactorProvider=7). */
+    webAuthnToken?: string;
     rememberDevice?: boolean;
     useRememberToken?: boolean;
   }
@@ -248,6 +250,12 @@ export async function loginWithPassword(
   if (rememberedToken) {
     body.set('twoFactorProvider', '5');
     body.set('twoFactorToken', rememberedToken);
+  } else if (options?.webAuthnToken) {
+    body.set('twoFactorProvider', '7');
+    body.set('twoFactorToken', options.webAuthnToken);
+    if (options.rememberDevice) {
+      body.set('twoFactorRemember', '1');
+    }
   } else if (options?.totpCode) {
     body.set('twoFactorProvider', '0');
     body.set('twoFactorToken', options.totpCode);
@@ -737,4 +745,215 @@ export async function rotateApiKey(authedFetch: AuthedFetch, masterPasswordHash:
   }
   const body = (await parseJson<{ apiKey?: string }>(resp)) || {};
   return String(body.apiKey || '');
+}
+
+// ---------------------------------------------------------------------------
+// WebAuthn (FIDO2) security key APIs
+// ---------------------------------------------------------------------------
+
+export interface WebAuthnKeyInfo {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
+interface WebAuthnChallengeResponse {
+  challenge: string;
+  rp?: { id?: string; name?: string };
+  user?: { id?: string; name?: string; displayName?: string };
+  pubKeyCredParams?: Array<{ type: string; alg: number }>;
+  timeout?: number;
+  excludeCredentials?: Array<{ type: string; id: string }>;
+  authenticatorSelection?: Record<string, unknown>;
+  attestation?: string;
+  keys?: WebAuthnKeyInfo[];
+  status?: string;
+  errorMessage?: string;
+}
+
+/** base64url encode without padding. */
+function toBase64Url(buf: ArrayBuffer | Uint8Array): string {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+/** base64url decode (with or without padding). */
+function fromBase64Url(b64: string): ArrayBuffer {
+  const normalized = b64.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4 || 4)) % 4);
+  const binary = atob(padded);
+  const buf = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
+  return buf.buffer;
+}
+
+/**
+ * Get WebAuthn registration challenge + list of existing keys.
+ */
+export async function getWebAuthnChallenge(
+  authedFetch: AuthedFetch
+): Promise<WebAuthnChallengeResponse> {
+  const resp = await authedFetch('/api/two-factor/webauthn');
+  if (!resp.ok) {
+    const body = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(body?.error_description || body?.error, t('txt_webauthn_load_failed')));
+  }
+  return (await parseJson<WebAuthnChallengeResponse>(resp)) || { challenge: '', keys: [] };
+}
+
+/**
+ * Register a new WebAuthn security key.
+ * Calls navigator.credentials.create() then submits the attestation to the server.
+ * Returns the updated list of registered keys.
+ */
+export async function registerWebAuthnKey(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string,
+  keyName: string
+): Promise<WebAuthnKeyInfo[]> {
+  // 1. Get challenge from server
+  const challenge = await getWebAuthnChallenge(authedFetch);
+  if (!challenge.challenge) throw new Error(t('txt_webauthn_challenge_failed'));
+
+  // 2. Call WebAuthn API
+  const creationOptions: PublicKeyCredentialCreationOptions = {
+    challenge: fromBase64Url(challenge.challenge),
+    rp: {
+      id: challenge.rp?.id,
+      name: challenge.rp?.name ?? 'NodeWarden',
+    },
+    user: {
+      id: fromBase64Url(challenge.user?.id ?? toBase64Url(crypto.getRandomValues(new Uint8Array(16)))),
+      name: challenge.user?.name ?? '',
+      displayName: challenge.user?.displayName ?? '',
+    },
+    pubKeyCredParams: (challenge.pubKeyCredParams ?? [
+      { type: 'public-key', alg: -7 },
+      { type: 'public-key', alg: -257 },
+    ]) as PublicKeyCredentialParameters[],
+    timeout: challenge.timeout ?? 60000,
+    excludeCredentials: (challenge.excludeCredentials ?? []).map(c => ({
+      type: 'public-key' as const,
+      id: fromBase64Url(c.id),
+    })),
+    authenticatorSelection: {
+      userVerification: 'discouraged',
+      ...(challenge.authenticatorSelection ?? {}),
+    },
+    attestation: 'none',
+  };
+
+  let credential: PublicKeyCredential;
+  try {
+    const cred = await navigator.credentials.create({ publicKey: creationOptions });
+    if (!cred || cred.type !== 'public-key') throw new Error(t('txt_webauthn_create_cancelled'));
+    credential = cred as PublicKeyCredential;
+  } catch (err) {
+    if (err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'AbortError')) {
+      throw new Error(t('txt_webauthn_create_cancelled'));
+    }
+    throw new Error(err instanceof Error ? err.message : t('txt_webauthn_create_failed'));
+  }
+
+  const attestation = credential.response as AuthenticatorAttestationResponse;
+  const body = {
+    id: credential.id,
+    rawId: toBase64Url(credential.rawId),
+    type: credential.type,
+    response: {
+      attestationObject: toBase64Url(attestation.attestationObject),
+      clientDataJSON: toBase64Url(attestation.clientDataJSON),
+    },
+    name: keyName.trim() || t('txt_webauthn_default_key_name'),
+    masterPasswordHash,
+  };
+
+  // 3. Submit attestation to server
+  const resp = await authedFetch('/api/two-factor/webauthn', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_register_failed')));
+  }
+  const result = (await parseJson<{ keys?: WebAuthnKeyInfo[] }>(resp)) || {};
+  return result.keys ?? [];
+}
+
+/**
+ * Delete a registered WebAuthn security key.
+ * Returns the updated list of registered keys.
+ */
+export async function deleteWebAuthnKey(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string,
+  keyId: string
+): Promise<WebAuthnKeyInfo[]> {
+  const resp = await authedFetch('/api/two-factor/webauthn', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ masterPasswordHash, id: keyId }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_delete_failed')));
+  }
+  const result = (await parseJson<{ keys?: WebAuthnKeyInfo[] }>(resp)) || {};
+  return result.keys ?? [];
+}
+
+/**
+ * Perform WebAuthn assertion during login (provider 7).
+ * Calls navigator.credentials.get() and returns the JSON token to submit.
+ * The caller should POST this to /identity/connect/token as twoFactorToken.
+ */
+export async function performWebAuthnAssertion(
+  challengePayload: {
+    challenge: string;
+    allowCredentials?: Array<{ type: string; id: string }>;
+    rpId?: string;
+    userVerification?: string;
+    timeout?: number;
+  }
+): Promise<string> {
+  const options: PublicKeyCredentialRequestOptions = {
+    challenge: fromBase64Url(challengePayload.challenge),
+    allowCredentials: (challengePayload.allowCredentials ?? []).map(c => ({
+      type: 'public-key' as const,
+      id: fromBase64Url(c.id),
+    })),
+    rpId: challengePayload.rpId,
+    userVerification: (challengePayload.userVerification ?? 'discouraged') as UserVerificationRequirement,
+    timeout: challengePayload.timeout ?? 60000,
+  };
+
+  let credential: PublicKeyCredential;
+  try {
+    const cred = await navigator.credentials.get({ publicKey: options });
+    if (!cred || cred.type !== 'public-key') throw new Error(t('txt_webauthn_get_cancelled'));
+    credential = cred as PublicKeyCredential;
+  } catch (err) {
+    if (err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'AbortError')) {
+      throw new Error(t('txt_webauthn_get_cancelled'));
+    }
+    throw new Error(err instanceof Error ? err.message : t('txt_webauthn_assertion_failed'));
+  }
+
+  const assertion = credential.response as AuthenticatorAssertionResponse;
+  return JSON.stringify({
+    id: credential.id,
+    rawId: toBase64Url(credential.rawId),
+    type: credential.type,
+    response: {
+      authenticatorData: toBase64Url(assertion.authenticatorData),
+      clientDataJSON: toBase64Url(assertion.clientDataJSON),
+      signature: toBase64Url(assertion.signature),
+      userHandle: assertion.userHandle ? toBase64Url(assertion.userHandle) : null,
+    },
+    extensions: {},
+  });
 }

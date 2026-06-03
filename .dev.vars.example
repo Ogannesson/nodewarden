@@ -3,3 +3,12 @@
 # Generate one with: openssl rand -hex 32
 # (Example only, 64 hex chars = 32 bytes)
 JWT_SECRET=Enter-your-JWT-key-here-at-least-32-characters
+
+# Email 2FA (optional — leave blank to disable Email 2FA entirely)
+# Sign up at https://resend.com and verify your sending domain.
+# RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# MFA_EMAIL_FROM=noreply@your-domain.com
+
+# Local testing: point to a mock HTTP server instead of real Resend.
+# The mock server must accept POST and return { "id": "..." } with HTTP 200.
+# RESEND_BASE_URL=http://localhost:9876/emails

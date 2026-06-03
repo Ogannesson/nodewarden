@@ -67,6 +67,8 @@ export interface BackupPayload {
     folders: SqlRow[];
     ciphers: SqlRow[];
     attachments: SqlRow[];
+    /** Multi-provider MFA rows (WebAuthn, Email, YubiKey…). TOTP stays in users. */
+    two_factors?: SqlRow[];
   };
 }
 
@@ -372,6 +374,19 @@ export function validateBackupPayloadContents(
       throw new Error(`Backup archive is missing required file: attachments/${cipherId}/${id}.bin`);
     }
   }
+
+  // two_factors rows are optional (older backups omit them); validate FK when present.
+  const twoFactorRows = ensureRowArray(payload.db.two_factors || [], 'two_factors');
+  for (const row of twoFactorRows) {
+    const userId = String(row.user_id || '').trim();
+    const atype = Number(row.atype);
+    if (!userId || !userIds.has(userId)) {
+      throw new Error(`Backup archive contains a two_factor row for an unknown user: ${userId || '(empty)'}`);
+    }
+    if (!Number.isFinite(atype)) {
+      throw new Error(`Backup archive contains a two_factor row with invalid atype: ${row.atype}`);
+    }
+  }
 }
 
 export async function buildBackupArchive(
@@ -390,7 +405,7 @@ export async function buildBackupArchive(
     includeAttachments,
   });
   const encoder = new TextEncoder();
-  const [configRows, userRows, domainSettingsRows, revisionRows, folderRows, cipherRows, attachmentRows] = await Promise.all([
+  const [configRows, userRows, domainSettingsRows, revisionRows, folderRows, cipherRows, attachmentRows, twoFactorRows] = await Promise.all([
     queryRows(env.DB, 'SELECT key, value FROM config ORDER BY key ASC'),
     queryRows(env.DB, 'SELECT id, email, name, master_password_hint, master_password_hash, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, role, status, verify_devices, totp_secret, totp_recovery_code, created_at, updated_at FROM users ORDER BY created_at ASC'),
     queryRows(env.DB, 'SELECT user_id, equivalent_domains, custom_equivalent_domains, excluded_global_equivalent_domains, updated_at FROM domain_settings ORDER BY user_id ASC'),
@@ -398,6 +413,7 @@ export async function buildBackupArchive(
     queryRows(env.DB, 'SELECT id, user_id, name, created_at, updated_at FROM folders ORDER BY created_at ASC'),
     queryRows(env.DB, 'SELECT id, user_id, type, folder_id, name, notes, favorite, data, reprompt, key, created_at, updated_at, archived_at, deleted_at FROM ciphers ORDER BY created_at ASC'),
     queryRows(env.DB, 'SELECT id, cipher_id, file_name, size, size_name, key FROM attachments ORDER BY cipher_id ASC, id ASC'),
+    queryRows(env.DB, 'SELECT user_id, atype, enabled, data, last_used, created_at, updated_at FROM two_factors ORDER BY user_id ASC, atype ASC').catch(() => [] as SqlRow[]),
   ]);
   const exportedConfigRows = sanitizeConfigRowsForExport(configRows);
   const exportedAttachmentRows = includeAttachments ? attachmentRows : [];
@@ -425,6 +441,7 @@ export async function buildBackupArchive(
       folders: folderRows.length,
       ciphers: cipherRows.length,
       attachments: exportedAttachmentRows.length,
+      two_factors: twoFactorRows.length,
     },
     includes: {
       attachments: includeAttachments,
@@ -447,6 +464,7 @@ export async function buildBackupArchive(
       folders: folderRows,
       ciphers: cipherRows,
       attachments: exportedAttachmentRows,
+      two_factors: twoFactorRows,
     }, null, BACKUP_JSON_INDENT)),
   };
 
