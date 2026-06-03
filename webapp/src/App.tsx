@@ -22,6 +22,7 @@ import {
   saveSession,
   stripProfileSecrets,
   getWebAuthnChallenge,
+  getEmailTwoFactorStatus,
 } from '@/lib/api/auth';
 import { clearAuditLogs, getAuditLogSettings, listAdminInvites, listAdminUsers, listAuditLogs, saveAuditLogSettings, type AuditLogFilters } from '@/lib/api/admin';
 import { getDomainRules, saveDomainRules } from '@/lib/api/domains';
@@ -1047,6 +1048,12 @@ export default function App() {
     enabled: !IS_DEMO_MODE && phase === 'app' && !!session?.accessToken && vaultInitialDecryptDone,
     staleTime: 30_000,
   });
+  const emailTwoFactorQuery = useQuery({
+    queryKey: ['email-two-factor-status', vaultCacheKey || session?.email],
+    queryFn: () => getEmailTwoFactorStatus(authedFetch),
+    enabled: !IS_DEMO_MODE && phase === 'app' && !!session?.accessToken && vaultInitialDecryptDone,
+    staleTime: 30_000,
+  });
   const domainRulesQueryKey = useMemo(() => ['domain-rules', vaultCacheKey || session?.email] as const, [vaultCacheKey, session?.email]);
   const domainRulesQuery = useQuery({
     queryKey: domainRulesQueryKey,
@@ -1439,6 +1446,7 @@ export default function App() {
     refetchTotpStatus: totpStatusQuery.refetch,
     refetchAuthorizedDevices: authorizedDevicesQuery.refetch,
     refetchWebAuthnKeys: webAuthnKeysQuery.refetch,
+    refetchEmailTwoFactorStatus: emailTwoFactorQuery.refetch,
   });
   const adminActions = useAdminActions({
     authedFetch,
@@ -1630,6 +1638,11 @@ export default function App() {
     webAuthnKeysLoading: webAuthnKeysQuery.isFetching && !webAuthnKeysQuery.data,
     onRegisterWebAuthnKey: accountSecurityActions.registerWebAuthnKey,
     onDeleteWebAuthnKey: accountSecurityActions.deleteWebAuthnKey,
+    onRenameWebAuthnKey: accountSecurityActions.renameWebAuthnKey,
+    onDisableAllWebAuthn: accountSecurityActions.disableAllWebAuthn,
+    emailTwoFactorEnabled: emailTwoFactorQuery.data?.enabled,
+    emailTwoFactorAvailable: emailTwoFactorQuery.data?.available,
+    onDisableEmailTwoFactor: accountSecurityActions.disableEmailTwoFactor,
     onRefreshAdmin: adminActions.refreshAdmin,
     onCreateInvite: adminActions.createInvite,
     onDeleteAllInvites: adminActions.deleteAllInvites,

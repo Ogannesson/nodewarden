@@ -1154,7 +1154,32 @@ const zhCN: Record<string, string> = {
   "txt_webauthn_use_key": "使用安全密钥",
   "txt_webauthn_waiting": "请触碰或激活您的安全密钥…",
   "txt_webauthn_not_supported": "您的浏览器不支持安全密钥（WebAuthn），请使用 Chrome、Edge 或 Firefox。",
-  "txt_webauthn_created_at": "添加于 {date}"
+  "txt_webauthn_created_at": "添加于 {date}",
+  "txt_webauthn_type_platform": "平台",
+  "txt_webauthn_type_usb": "USB",
+  "txt_webauthn_type_nfc": "NFC",
+  "txt_webauthn_type_ble": "蓝牙",
+  "txt_webauthn_type_generic": "密钥",
+  "txt_webauthn_rename": "重命名",
+  "txt_webauthn_rename_placeholder": "新密钥名称",
+  "txt_webauthn_rename_save": "保存",
+  "txt_webauthn_rename_cancel": "取消",
+  "txt_webauthn_rename_success": "安全密钥已重命名",
+  "txt_webauthn_rename_failed": "重命名安全密钥失败",
+  "txt_webauthn_disable_all_failed": "禁用所有安全密钥失败",
+  "txt_webauthn_disable_all_title": "禁用安全密钥",
+  "txt_webauthn_disable_all_msg": "请输入主密码以禁用所有安全密钥。",
+  "txt_mfa_status_enabled": "两步验证 · 已启用",
+  "txt_mfa_status_disabled": "两步验证 · 未启用",
+  "txt_mfa_last_method_title": "禁用两步验证？",
+  "txt_mfa_last_method_msg": "这是您最后一个启用的验证方式。禁用后账户将不再要求两步验证。确定继续？",
+  "txt_email_mfa": "邮件验证",
+  "txt_email_mfa_enabled": "邮件两步验证已启用",
+  "txt_email_mfa_disable": "禁用邮件验证",
+  "txt_email_mfa_disable_title": "禁用邮件验证",
+  "txt_email_mfa_disable_msg": "请输入主密码以禁用邮件两步验证。",
+  "txt_email_mfa_disable_success": "邮件验证已禁用",
+  "txt_email_mfa_disable_failed": "禁用邮件验证失败"
 };
 
 export default zhCN;

@@ -1154,7 +1154,32 @@ const zhTW: Record<string, string> = {
   "txt_webauthn_use_key": "使用安全金鑰",
   "txt_webauthn_waiting": "請觸碰或啟用您的安全金鑰…",
   "txt_webauthn_not_supported": "您的瀏覽器不支援安全金鑰（WebAuthn），請使用 Chrome、Edge 或 Firefox。",
-  "txt_webauthn_created_at": "新增於 {date}"
+  "txt_webauthn_created_at": "新增於 {date}",
+  "txt_webauthn_type_platform": "平台",
+  "txt_webauthn_type_usb": "USB",
+  "txt_webauthn_type_nfc": "NFC",
+  "txt_webauthn_type_ble": "藍牙",
+  "txt_webauthn_type_generic": "金鑰",
+  "txt_webauthn_rename": "重新命名",
+  "txt_webauthn_rename_placeholder": "新金鑰名稱",
+  "txt_webauthn_rename_save": "儲存",
+  "txt_webauthn_rename_cancel": "取消",
+  "txt_webauthn_rename_success": "安全金鑰已重新命名",
+  "txt_webauthn_rename_failed": "重新命名安全金鑰失敗",
+  "txt_webauthn_disable_all_failed": "停用所有安全金鑰失敗",
+  "txt_webauthn_disable_all_title": "停用安全金鑰",
+  "txt_webauthn_disable_all_msg": "請輸入主密碼以停用所有安全金鑰。",
+  "txt_mfa_status_enabled": "兩步驟驗證 · 已啟用",
+  "txt_mfa_status_disabled": "兩步驟驗證 · 未啟用",
+  "txt_mfa_last_method_title": "停用兩步驟驗證？",
+  "txt_mfa_last_method_msg": "這是您最後一個啟用的驗證方式。停用後帳戶將不再要求兩步驟驗證。確定繼續？",
+  "txt_email_mfa": "電子郵件驗證",
+  "txt_email_mfa_enabled": "電子郵件兩步驟驗證已啟用",
+  "txt_email_mfa_disable": "停用電子郵件驗證",
+  "txt_email_mfa_disable_title": "停用電子郵件驗證",
+  "txt_email_mfa_disable_msg": "請輸入主密碼以停用電子郵件兩步驟驗證。",
+  "txt_email_mfa_disable_success": "電子郵件驗證已停用",
+  "txt_email_mfa_disable_failed": "停用電子郵件驗證失敗"
 };
 
 export default zhTW;

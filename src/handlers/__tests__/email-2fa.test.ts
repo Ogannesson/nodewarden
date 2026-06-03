@@ -43,13 +43,15 @@ vi.mock('../../services/audit-events', () => ({
   writeAuditEvent: vi.fn(() => Promise.resolve()),
 }));
 
-// Mock StorageService used by handleSendEmailLogin.
+// Mock StorageService used by handleSendEmailLogin and handleGetEmailTwoFactor.
 const mockStorageGetUser = vi.fn<() => Promise<User | null>>();
+const mockStorageGetUserById = vi.fn<() => Promise<User | null>>();
 const mockStorageSaveUser = vi.fn(() => Promise.resolve());
 vi.mock('../../services/storage', () => ({
   StorageService: function () {
     return {
       getUser: mockStorageGetUser,
+      getUserById: mockStorageGetUserById,
       saveUser: mockStorageSaveUser,
     };
   },
@@ -102,6 +104,7 @@ import {
   MAX_ATTEMPTS,
 } from '../../services/two-factor/email-provider';
 import { handleSendEmailLogin } from '../identity';
+import { handleGetEmailTwoFactor } from '../accounts';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -521,5 +524,52 @@ describe('generateNumericCode', () => {
     const codes = new Set(Array.from({ length: 50 }, () => generateNumericCode()));
     // With 1M possibilities, 50 calls should almost certainly produce >1 unique code.
     expect(codes.size).toBeGreaterThan(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. handleGetEmailTwoFactor — available flag reflects server configuration
+// ---------------------------------------------------------------------------
+
+describe('handleGetEmailTwoFactor — available flag', () => {
+  function makeGetRequest(): Request {
+    return new Request('https://example.com/api/two-factor/email', { method: 'GET' });
+  }
+
+  function makeEnv(configured: boolean): import('../../types').Env {
+    return {
+      DB: {} as D1Database,
+      JWT_SECRET: 'test',
+      ...(configured ? { RESEND_API_KEY: 're_key', MFA_EMAIL_FROM: 'noreply@example.com' } : {}),
+    } as unknown as import('../../types').Env;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStorageGetUserById.mockResolvedValue(makeUser());
+    mockGetTwoFactor.mockResolvedValue(null);
+  });
+
+  it('returns available=true when RESEND_API_KEY and MFA_EMAIL_FROM are set', async () => {
+    const resp = await handleGetEmailTwoFactor(makeGetRequest(), makeEnv(true), 'user-001');
+    expect(resp.status).toBe(200);
+    const body = await resp.json() as { available: boolean; enabled: boolean };
+    expect(body.available).toBe(true);
+    expect(body.enabled).toBe(false); // no enrollment row
+  });
+
+  it('returns available=false when email provider env vars are missing', async () => {
+    const resp = await handleGetEmailTwoFactor(makeGetRequest(), makeEnv(false), 'user-001');
+    expect(resp.status).toBe(200);
+    const body = await resp.json() as { available: boolean; enabled: boolean };
+    expect(body.available).toBe(false);
+  });
+
+  it('returns enabled=true when enrollment row exists and available=true', async () => {
+    mockGetTwoFactor.mockResolvedValue(makeEnrollmentRow('test@example.com'));
+    const resp = await handleGetEmailTwoFactor(makeGetRequest(), makeEnv(true), 'user-001');
+    const body = await resp.json() as { available: boolean; enabled: boolean };
+    expect(body.available).toBe(true);
+    expect(body.enabled).toBe(true);
   });
 });

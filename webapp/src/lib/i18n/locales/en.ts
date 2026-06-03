@@ -1154,7 +1154,32 @@ const en: Record<string, string> = {
   "txt_webauthn_use_key": "Use Security Key",
   "txt_webauthn_waiting": "Touch / activate your security key…",
   "txt_webauthn_not_supported": "Your browser does not support security keys (WebAuthn). Please use Chrome, Edge, or Firefox.",
-  "txt_webauthn_created_at": "Added {date}"
+  "txt_webauthn_created_at": "Added {date}",
+  "txt_webauthn_type_platform": "Platform",
+  "txt_webauthn_type_usb": "USB",
+  "txt_webauthn_type_nfc": "NFC",
+  "txt_webauthn_type_ble": "Bluetooth",
+  "txt_webauthn_type_generic": "Key",
+  "txt_webauthn_rename": "Rename",
+  "txt_webauthn_rename_placeholder": "New key name",
+  "txt_webauthn_rename_save": "Save",
+  "txt_webauthn_rename_cancel": "Cancel",
+  "txt_webauthn_rename_success": "Security key renamed",
+  "txt_webauthn_rename_failed": "Failed to rename security key",
+  "txt_webauthn_disable_all_failed": "Failed to disable all security keys",
+  "txt_webauthn_disable_all_title": "Disable Security Keys",
+  "txt_webauthn_disable_all_msg": "Enter your master password to disable all security keys.",
+  "txt_mfa_status_enabled": "Two-step verification · Enabled",
+  "txt_mfa_status_disabled": "Two-step verification · Not enabled",
+  "txt_mfa_last_method_title": "Disable Two-Step Verification?",
+  "txt_mfa_last_method_msg": "This is your last active method. Disabling it will remove two-step verification from your account. Continue?",
+  "txt_email_mfa": "Email Verification",
+  "txt_email_mfa_enabled": "Email 2FA is active",
+  "txt_email_mfa_disable": "Disable Email Verification",
+  "txt_email_mfa_disable_title": "Disable Email Verification",
+  "txt_email_mfa_disable_msg": "Enter your master password to disable email two-factor authentication.",
+  "txt_email_mfa_disable_success": "Email verification disabled",
+  "txt_email_mfa_disable_failed": "Failed to disable email verification"
 };
 
 export default en;

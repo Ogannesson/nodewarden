@@ -16,6 +16,7 @@ import {
   handleGetWebAuthnChallenge,
   handleRegisterWebAuthn,
   handleDeleteWebAuthn,
+  handleRenameWebAuthn,
   handleGetEmailTwoFactor,
   handleSendEmailSetup,
   handleEnableEmailTwoFactor,
@@ -124,6 +125,7 @@ export async function handleAuthenticatedRoute(
       return handleGetWebAuthnChallenge(request, env, userId);
     }
     if (method === 'POST') return handleRegisterWebAuthn(request, env, userId);
+    if (method === 'PUT') return handleRenameWebAuthn(request, env, userId);
     if (method === 'DELETE') return handleDeleteWebAuthn(request, env, userId);
     return null;
   }

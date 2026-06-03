@@ -755,6 +755,10 @@ export interface WebAuthnKeyInfo {
   id: string;
   name: string;
   createdAt: string;
+  /** Authenticator transport hints — absent on legacy credentials. */
+  transports?: string[];
+  /** Authenticator attachment ('platform' | 'cross-platform') — absent on legacy credentials. */
+  attachment?: string;
 }
 
 interface WebAuthnChallengeResponse {
@@ -858,6 +862,12 @@ export async function registerWebAuthnKey(
   }
 
   const attestation = credential.response as AuthenticatorAttestationResponse;
+  // Capture transports and attachment for type-badge display server-side
+  const transports: string[] = typeof (attestation as { getTransports?: () => string[] }).getTransports === 'function'
+    ? (attestation as { getTransports: () => string[] }).getTransports()
+    : [];
+  const attachment: string | undefined = (credential as { authenticatorAttachment?: string | null }).authenticatorAttachment ?? undefined;
+
   const body = {
     id: credential.id,
     rawId: toBase64Url(credential.rawId),
@@ -868,6 +878,8 @@ export async function registerWebAuthnKey(
     },
     name: keyName.trim() || t('txt_webauthn_default_key_name'),
     masterPasswordHash,
+    transports,
+    attachment,
   };
 
   // 3. Submit attestation to server
@@ -901,6 +913,51 @@ export async function deleteWebAuthnKey(
   if (!resp.ok) {
     const errBody = await parseJson<TokenError>(resp);
     throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_delete_failed')));
+  }
+  const result = (await parseJson<{ keys?: WebAuthnKeyInfo[] }>(resp)) || {};
+  return result.keys ?? [];
+}
+
+/**
+ * Rename a registered WebAuthn security key.
+ * Does not require masterPasswordHash — renaming is cosmetic.
+ * Returns the updated list of keys.
+ */
+export async function renameWebAuthnKey(
+  authedFetch: AuthedFetch,
+  credentialId: string,
+  name: string
+): Promise<WebAuthnKeyInfo[]> {
+  const resp = await authedFetch('/api/two-factor/webauthn', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ credentialId, name }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_rename_failed')));
+  }
+  const result = (await parseJson<{ keys?: WebAuthnKeyInfo[] }>(resp)) || {};
+  return result.keys ?? [];
+}
+
+/**
+ * Disable all WebAuthn credentials for the current user.
+ * Requires masterPasswordHash for verification.
+ * Returns the updated (empty) list of keys.
+ */
+export async function disableAllWebAuthn(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string
+): Promise<WebAuthnKeyInfo[]> {
+  const resp = await authedFetch('/api/two-factor/webauthn', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_disable_all_failed')));
   }
   const result = (await parseJson<{ keys?: WebAuthnKeyInfo[] }>(resp)) || {};
   return result.keys ?? [];
@@ -956,4 +1013,35 @@ export async function performWebAuthnAssertion(
     },
     extensions: {},
   });
+}
+
+/**
+ * GET /api/two-factor/email
+ * Returns whether email 2FA is enabled for the current user.
+ */
+export async function getEmailTwoFactorStatus(authedFetch: AuthedFetch): Promise<{ enabled: boolean; available: boolean }> {
+  const resp = await authedFetch('/api/two-factor/email', { method: 'GET' });
+  if (!resp.ok) return { enabled: false, available: false };
+  const result = (await parseJson<{ enabled?: boolean; available?: boolean }>(resp)) || {};
+  // available is explicitly returned by the server (true only when RESEND_API_KEY + MFA_EMAIL_FROM are set)
+  return { enabled: !!result.enabled, available: !!result.available };
+}
+
+/**
+ * DELETE /api/two-factor/email
+ * Disable email 2FA for the current user. Requires masterPasswordHash.
+ */
+export async function disableEmailTwoFactor(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string
+): Promise<void> {
+  const resp = await authedFetch('/api/two-factor/email', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_email_mfa_disable_failed')));
+  }
 }

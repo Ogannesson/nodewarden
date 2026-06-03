@@ -1154,7 +1154,32 @@ const ru: Record<string, string> = {
   "txt_webauthn_use_key": "Использовать ключ безопасности",
   "txt_webauthn_waiting": "Прикоснитесь или активируйте ваш ключ безопасности…",
   "txt_webauthn_not_supported": "Ваш браузер не поддерживает ключи безопасности (WebAuthn). Используйте Chrome, Edge или Firefox.",
-  "txt_webauthn_created_at": "Добавлен {date}"
+  "txt_webauthn_created_at": "Добавлен {date}",
+  "txt_webauthn_type_platform": "Платформенный",
+  "txt_webauthn_type_usb": "USB",
+  "txt_webauthn_type_nfc": "NFC",
+  "txt_webauthn_type_ble": "Bluetooth",
+  "txt_webauthn_type_generic": "Ключ",
+  "txt_webauthn_rename": "Переименовать",
+  "txt_webauthn_rename_placeholder": "Новое название ключа",
+  "txt_webauthn_rename_save": "Сохранить",
+  "txt_webauthn_rename_cancel": "Отмена",
+  "txt_webauthn_rename_success": "Ключ безопасности переименован",
+  "txt_webauthn_rename_failed": "Не удалось переименовать ключ безопасности",
+  "txt_webauthn_disable_all_failed": "Не удалось отключить все ключи безопасности",
+  "txt_webauthn_disable_all_title": "Отключить ключи безопасности",
+  "txt_webauthn_disable_all_msg": "Введите мастер-пароль для отключения всех ключей безопасности.",
+  "txt_mfa_status_enabled": "Двухэтапная аутентификация · Включена",
+  "txt_mfa_status_disabled": "Двухэтапная аутентификация · Не включена",
+  "txt_mfa_last_method_title": "Отключить двухэтапную аутентификацию?",
+  "txt_mfa_last_method_msg": "Это ваш последний активный метод аутентификации. После отключения учётная запись не будет требовать двухэтапной аутентификации. Продолжить?",
+  "txt_email_mfa": "Аутентификация по email",
+  "txt_email_mfa_enabled": "Двухфакторная аутентификация по email активна",
+  "txt_email_mfa_disable": "Отключить аутентификацию по email",
+  "txt_email_mfa_disable_title": "Отключить аутентификацию по email",
+  "txt_email_mfa_disable_msg": "Введите мастер-пароль для отключения двухфакторной аутентификации по email.",
+  "txt_email_mfa_disable_success": "Аутентификация по email отключена",
+  "txt_email_mfa_disable_failed": "Не удалось отключить аутентификацию по email"
 };
 
 export default ru;

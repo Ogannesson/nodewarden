@@ -70,6 +70,10 @@ export interface WebAuthnCredential {
   /** Human-readable name set by the user. */
   name: string;
   createdAt: string;
+  /** Authenticator transport hints (e.g. 'usb', 'nfc', 'ble', 'internal', 'hybrid'). Optional — absent on legacy credentials. */
+  transports?: string[];
+  /** Authenticator attachment ('platform' | 'cross-platform'). Optional — absent on legacy credentials. */
+  attachment?: string;
 }
 
 /** Shape stored in two_factors.data for atype=7. */
@@ -533,6 +537,8 @@ interface RegistrationBody {
     clientDataJson?: string;
   };
   deviceName?: string;
+  transports?: string[];
+  attachment?: string;
 }
 
 /**
@@ -623,6 +629,8 @@ export async function completeRegistration(
     signCount: parsedAuthData.signCount,
     name: deviceName.slice(0, 64),
     createdAt: new Date().toISOString(),
+    transports: Array.isArray(body.transports) ? body.transports : undefined,
+    attachment: body.attachment ? String(body.attachment) : undefined,
   };
 
   // Persist to two_factors(atype=7)
@@ -673,6 +681,64 @@ export async function completeRegistration(
 export function listCredentials(twoFactorRows: TwoFactorRow[]): WebAuthnCredential[] {
   const row = twoFactorRows.find(r => r.atype === TwoFactorType.WebAuthn);
   return parseCredentialStore(row).credentials;
+}
+
+/**
+ * Rename a specific WebAuthn credential by ID.
+ * Name is trimmed and truncated to 64 characters.
+ * Returns true if the credential was found and renamed, false otherwise.
+ */
+export async function renameCredential(
+  db: D1Database,
+  userId: string,
+  credentialId: string,
+  newName: string
+): Promise<boolean> {
+  const row = await db
+    .prepare('SELECT data FROM two_factors WHERE user_id = ? AND atype = ?')
+    .bind(userId, TwoFactorType.WebAuthn)
+    .first<{ data: string }>();
+
+  if (!row) return false;
+
+  let store: WebAuthnCredentialStore;
+  try {
+    store = JSON.parse(row.data) as WebAuthnCredentialStore;
+    if (!Array.isArray(store.credentials)) return false;
+  } catch {
+    return false;
+  }
+
+  const credential = store.credentials.find(c => c.id === credentialId);
+  if (!credential) return false;
+
+  credential.name = newName.trim().slice(0, 64);
+
+  const nowIso = new Date().toISOString();
+  await db.prepare(
+    'UPDATE two_factors SET data = ?, updated_at = ? WHERE user_id = ? AND atype = ?'
+  )
+    .bind(JSON.stringify(store), nowIso, userId, TwoFactorType.WebAuthn)
+    .run();
+
+  return true;
+}
+
+/**
+ * Disable all WebAuthn credentials for a user.
+ * Sets enabled=0 and clears the credentials array.
+ * No-op if no row exists.
+ */
+export async function disableAllWebAuthn(
+  db: D1Database,
+  userId: string
+): Promise<void> {
+  const nowIso = new Date().toISOString();
+  await db.prepare(
+    'UPDATE two_factors SET enabled = 0, data = ?, updated_at = ? WHERE user_id = ? AND atype = ?'
+  )
+    .bind(JSON.stringify({ credentials: [] }), nowIso, userId, TwoFactorType.WebAuthn)
+    .run();
 }
 
 /**

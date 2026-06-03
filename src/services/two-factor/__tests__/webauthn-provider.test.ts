@@ -462,3 +462,131 @@ describe('WebAuthnTwoFactorProvider.isEnabledForUser', () => {
     expect(provider.isEnabledForUser(user, rows)).toBe(false);
   });
 });
+
+// -----------------------------------------------------------------------
+// renameCredential tests
+// -----------------------------------------------------------------------
+
+import { renameCredential, disableAllWebAuthn } from '../webauthn-provider';
+
+describe('renameCredential', () => {
+  function buildSimpleDb(credentialData: unknown | null): {
+    db: D1Database;
+    updateCalledWith: Array<unknown[]>;
+  } {
+    const updateCalledWith: Array<unknown[]> = [];
+    const db = {
+      prepare: (sql: string) => ({
+        bind: (...args: unknown[]) => ({
+          first: async () => {
+            if (sql.includes('SELECT data FROM two_factors')) {
+              if (credentialData === null) return null;
+              return { data: JSON.stringify(credentialData) };
+            }
+            return null;
+          },
+          run: async () => {
+            if (sql.includes('UPDATE two_factors')) {
+              updateCalledWith.push(args);
+            }
+            return { meta: { changes: 1 } };
+          },
+          all: async () => ({ results: [] }),
+        }),
+      }),
+    } as unknown as D1Database;
+    return { db, updateCalledWith };
+  }
+
+  it('renames and returns true when credential exists', async () => {
+    const store = { credentials: [{ id: 'cred-1', publicKeyCbor: 'abc', signCount: 0, name: 'Old Name', createdAt: '' }] };
+    const { db, updateCalledWith } = buildSimpleDb(store);
+    const result = await renameCredential(db, 'user-1', 'cred-1', 'New Name');
+    expect(result).toBe(true);
+    expect(updateCalledWith).toHaveLength(1);
+    const savedData = JSON.parse(updateCalledWith[0]![0] as string) as { credentials: Array<{ name: string }> };
+    expect(savedData.credentials[0]!.name).toBe('New Name');
+  });
+
+  it('returns false when no row exists', async () => {
+    const { db } = buildSimpleDb(null);
+    const result = await renameCredential(db, 'user-1', 'cred-1', 'Name');
+    expect(result).toBe(false);
+  });
+
+  it('returns false when credential id not found', async () => {
+    const store = { credentials: [{ id: 'other-cred', publicKeyCbor: 'abc', signCount: 0, name: 'k', createdAt: '' }] };
+    const { db } = buildSimpleDb(store);
+    const result = await renameCredential(db, 'user-1', 'cred-1', 'Name');
+    expect(result).toBe(false);
+  });
+
+  it('truncates name to 64 characters', async () => {
+    const longName = 'A'.repeat(100);
+    const store = { credentials: [{ id: 'cred-1', publicKeyCbor: 'abc', signCount: 0, name: 'k', createdAt: '' }] };
+    const { db, updateCalledWith } = buildSimpleDb(store);
+    const result = await renameCredential(db, 'user-1', 'cred-1', longName);
+    expect(result).toBe(true);
+    const savedData = JSON.parse(updateCalledWith[0]![0] as string) as { credentials: Array<{ name: string }> };
+    expect(savedData.credentials[0]!.name).toHaveLength(64);
+  });
+
+  it('trims whitespace from name', async () => {
+    const store = { credentials: [{ id: 'cred-1', publicKeyCbor: 'abc', signCount: 0, name: 'k', createdAt: '' }] };
+    const { db, updateCalledWith } = buildSimpleDb(store);
+    const result = await renameCredential(db, 'user-1', 'cred-1', '  My Key  ');
+    expect(result).toBe(true);
+    const savedData = JSON.parse(updateCalledWith[0]![0] as string) as { credentials: Array<{ name: string }> };
+    expect(savedData.credentials[0]!.name).toBe('My Key');
+  });
+});
+
+// -----------------------------------------------------------------------
+// disableAllWebAuthn tests
+// -----------------------------------------------------------------------
+
+describe('disableAllWebAuthn', () => {
+  function buildDisableDb(): {
+    db: D1Database;
+    updateCalledWith: Array<unknown[]>;
+  } {
+    const updateCalledWith: Array<unknown[]> = [];
+    const db = {
+      prepare: (sql: string) => ({
+        bind: (...args: unknown[]) => ({
+          run: async () => {
+            if (sql.includes('UPDATE two_factors')) {
+              updateCalledWith.push(args);
+            }
+            return { meta: { changes: 1 } };
+          },
+          first: async () => null,
+          all: async () => ({ results: [] }),
+        }),
+      }),
+    } as unknown as D1Database;
+    return { db, updateCalledWith };
+  }
+
+  it('clears all credentials and sets enabled=0', async () => {
+    const { db, updateCalledWith } = buildDisableDb();
+    await disableAllWebAuthn(db, 'user-1');
+    expect(updateCalledWith).toHaveLength(1);
+    const [savedData, , userId] = updateCalledWith[0]!;
+    expect(JSON.parse(savedData as string)).toEqual({ credentials: [] });
+    expect(userId).toBe('user-1');
+  });
+
+  it('does not throw when no row exists (UPDATE affects 0 rows)', async () => {
+    const db = {
+      prepare: () => ({
+        bind: () => ({
+          run: async () => ({ meta: { changes: 0 } }),
+          first: async () => null,
+          all: async () => ({ results: [] }),
+        }),
+      }),
+    } as unknown as D1Database;
+    await expect(disableAllWebAuthn(db, 'user-1')).resolves.toBeUndefined();
+  });
+});

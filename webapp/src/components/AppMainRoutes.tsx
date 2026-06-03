@@ -128,6 +128,11 @@ export interface AppMainRoutesProps {
   webAuthnKeysLoading: boolean;
   onRegisterWebAuthnKey: (masterPassword: string, keyName: string) => Promise<WebAuthnKeyInfo[]>;
   onDeleteWebAuthnKey: (masterPassword: string, keyId: string) => Promise<void>;
+  onRenameWebAuthnKey?: (credentialId: string, name: string) => Promise<WebAuthnKeyInfo[]>;
+  onDisableAllWebAuthn?: (masterPassword: string) => Promise<void>;
+  emailTwoFactorEnabled?: boolean;
+  emailTwoFactorAvailable?: boolean;
+  onDisableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
   onCreateInvite: (hours: number) => Promise<void>;
   onRefreshAdmin: () => void;
   onDeleteAllInvites: () => Promise<void>;
@@ -273,6 +278,11 @@ export default function AppMainRoutes(props: AppMainRoutesProps) {
                 webAuthnKeysLoading={props.webAuthnKeysLoading}
                 onRegisterWebAuthnKey={props.onRegisterWebAuthnKey}
                 onDeleteWebAuthnKey={props.onDeleteWebAuthnKey}
+                onRenameWebAuthnKey={props.onRenameWebAuthnKey}
+                onDisableAllWebAuthn={props.onDisableAllWebAuthn}
+                emailTwoFactorEnabled={props.emailTwoFactorEnabled}
+                emailTwoFactorAvailable={props.emailTwoFactorAvailable}
+                onDisableEmailTwoFactor={props.onDisableEmailTwoFactor}
               />
             </Suspense>
           </div>

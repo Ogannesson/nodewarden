@@ -912,6 +912,8 @@ import {
   completeRegistration,
   listCredentials,
   deleteCredential,
+  renameCredential,
+  disableAllWebAuthn,
 } from '../services/two-factor/webauthn-provider';
 
 /**
@@ -953,6 +955,8 @@ export async function handleGetWebAuthnChallenge(request: Request, env: Env, use
       id: c.id,
       name: c.name,
       createdAt: c.createdAt,
+      transports: c.transports,
+      attachment: c.attachment,
     })),
     object: 'twoFactorWebAuthn',
   });
@@ -996,6 +1000,8 @@ export async function handleRegisterWebAuthn(request: Request, env: Env, userId:
         type: String(body.type ?? 'public-key'),
         response: body.response as Record<string, string> | undefined,
         deviceName: String(body.name ?? body.deviceName ?? ''),
+        transports: Array.isArray(body.transports) ? body.transports as string[] : undefined,
+        attachment: body.attachment ? String(body.attachment) : undefined,
       },
       env
     );
@@ -1025,7 +1031,9 @@ export async function handleRegisterWebAuthn(request: Request, env: Env, userId:
       id: credential.id,
       name: credential.name,
       createdAt: credential.createdAt,
-      keys: allCredentials.map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt })),
+      transports: credential.transports,
+      attachment: credential.attachment,
+      keys: allCredentials.map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt, transports: c.transports, attachment: c.attachment })),
       object: 'twoFactorWebAuthn',
     });
   } catch (e) {
@@ -1036,7 +1044,9 @@ export async function handleRegisterWebAuthn(request: Request, env: Env, userId:
 
 /**
  * DELETE /api/two-factor/webauthn
- * Remove a registered WebAuthn credential by ID.
+ * Two modes:
+ *   - With credentialId/id in body: remove a single credential (requires masterPasswordHash).
+ *   - Without credentialId/id: disable ALL WebAuthn credentials (requires masterPasswordHash).
  */
 export async function handleDeleteWebAuthn(request: Request, env: Env, userId: string): Promise<Response> {
   const storage = new StorageService(env.DB);
@@ -1063,7 +1073,21 @@ export async function handleDeleteWebAuthn(request: Request, env: Env, userId: s
   if (!valid) return errorResponse('Invalid password', 400);
 
   const credentialId = String(body.id ?? body.credentialId ?? '').trim();
-  if (!credentialId) return errorResponse('credentialId (id) is required', 400);
+
+  // Bulk disable: no credentialId → disable all WebAuthn credentials
+  if (!credentialId) {
+    await disableAllWebAuthn(env.DB, userId);
+    await safeWriteAuditEvent(env, {
+      actorUserId: userId,
+      action: 'account.webauthn.disable_all',
+      category: 'security',
+      level: 'security',
+      targetType: 'webauthn_credential',
+      targetId: '',
+      metadata: auditRequestMetadata(request),
+    });
+    return jsonResponse({ keys: [], object: 'twoFactorWebAuthn' });
+  }
 
   const deleted = await deleteCredential(env.DB, userId, credentialId);
   if (!deleted) return errorResponse('Credential not found', 404);
@@ -1081,9 +1105,45 @@ export async function handleDeleteWebAuthn(request: Request, env: Env, userId: s
   const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
   const remaining = listCredentials(twoFactorRows);
   return jsonResponse({
-    keys: remaining.map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt })),
+    keys: remaining.map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt, transports: c.transports, attachment: c.attachment })),
     object: 'twoFactorWebAuthn',
   });
+}
+
+/**
+ * PUT /api/two-factor/webauthn
+ * Rename a registered WebAuthn credential.
+ * Requires only login authentication (not masterPasswordHash — renaming is cosmetic).
+ */
+export async function handleRenameWebAuthn(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, unknown>;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+
+  const credentialId = String(body.credentialId ?? '').trim();
+  const name = String(body.name ?? '').trim();
+  if (!credentialId) return errorResponse('credentialId is required', 400);
+  if (!name) return errorResponse('name is required', 400);
+
+  const renamed = await renameCredential(env.DB, userId, credentialId, name);
+  if (!renamed) return errorResponse('Credential not found', 404);
+
+  const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
+  const keys = listCredentials(twoFactorRows).map(c => ({
+    id: c.id,
+    name: c.name,
+    createdAt: c.createdAt,
+    transports: c.transports,
+    attachment: c.attachment,
+  }));
+  return jsonResponse({ keys, object: 'twoFactorWebAuthn' });
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,12 +1160,16 @@ export async function handleGetEmailTwoFactor(request: Request, env: Env, userId
   const user = await storage.getUserById(userId);
   if (!user) return errorResponse('User not found', 404);
 
+  // available = email provider is configured (RESEND_API_KEY + MFA_EMAIL_FROM must be set)
+  const available = !!(env.RESEND_API_KEY && env.MFA_EMAIL_FROM);
+
   const row = await getTwoFactor(env.DB, userId, EMAIL_ENROLLMENT_ATYPE);
   const enabled = row?.enabled ?? false;
   const email = enabled && row ? (JSON.parse(row.data) as { email: string }).email : null;
 
   return jsonResponse({
     enabled,
+    available,
     email: email ? maskEmail(email) : null,
     object: 'twoFactorEmail',
   });

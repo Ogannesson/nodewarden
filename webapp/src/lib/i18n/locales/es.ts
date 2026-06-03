@@ -1154,7 +1154,32 @@ const es: Record<string, string> = {
   "txt_webauthn_use_key": "Usar clave de seguridad",
   "txt_webauthn_waiting": "Toque o active su clave de seguridad…",
   "txt_webauthn_not_supported": "Su navegador no admite claves de seguridad (WebAuthn). Use Chrome, Edge o Firefox.",
-  "txt_webauthn_created_at": "Añadida el {date}"
+  "txt_webauthn_created_at": "Añadida el {date}",
+  "txt_webauthn_type_platform": "Plataforma",
+  "txt_webauthn_type_usb": "USB",
+  "txt_webauthn_type_nfc": "NFC",
+  "txt_webauthn_type_ble": "Bluetooth",
+  "txt_webauthn_type_generic": "Clave",
+  "txt_webauthn_rename": "Renombrar",
+  "txt_webauthn_rename_placeholder": "Nuevo nombre de clave",
+  "txt_webauthn_rename_save": "Guardar",
+  "txt_webauthn_rename_cancel": "Cancelar",
+  "txt_webauthn_rename_success": "Clave de seguridad renombrada",
+  "txt_webauthn_rename_failed": "Error al renombrar la clave de seguridad",
+  "txt_webauthn_disable_all_failed": "Error al deshabilitar todas las claves de seguridad",
+  "txt_webauthn_disable_all_title": "Deshabilitar claves de seguridad",
+  "txt_webauthn_disable_all_msg": "Ingrese su contraseña maestra para deshabilitar todas las claves de seguridad.",
+  "txt_mfa_status_enabled": "Verificación en dos pasos · Habilitada",
+  "txt_mfa_status_disabled": "Verificación en dos pasos · No habilitada",
+  "txt_mfa_last_method_title": "¿Deshabilitar la verificación en dos pasos?",
+  "txt_mfa_last_method_msg": "Este es su último método activo. Al deshabilitarlo, su cuenta ya no requerirá la verificación en dos pasos. ¿Continuar?",
+  "txt_email_mfa": "Verificación por correo electrónico",
+  "txt_email_mfa_enabled": "La 2FA por correo electrónico está activa",
+  "txt_email_mfa_disable": "Deshabilitar verificación por correo",
+  "txt_email_mfa_disable_title": "Deshabilitar verificación por correo electrónico",
+  "txt_email_mfa_disable_msg": "Ingrese su contraseña maestra para deshabilitar la verificación en dos pasos por correo.",
+  "txt_email_mfa_disable_success": "Verificación por correo electrónico deshabilitada",
+  "txt_email_mfa_disable_failed": "Error al deshabilitar la verificación por correo electrónico"
 };
 
 export default es;

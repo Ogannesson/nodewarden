@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
-import { Clipboard, KeyRound, RefreshCw, ShieldCheck, ShieldOff, Trash2 } from 'lucide-preact';
+import { Bluetooth, Clipboard, FingerprintPattern, KeyRound, Pencil, Radio, RefreshCw, ShieldCheck, ShieldOff, Trash2, Usb } from 'lucide-preact';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import qrcode from 'qrcode-generator';
 import type { Profile } from '@/lib/types';
@@ -26,6 +26,24 @@ interface SettingsPageProps {
   webAuthnKeysLoading?: boolean;
   onRegisterWebAuthnKey?: (masterPassword: string, keyName: string) => Promise<WebAuthnKeyInfo[]>;
   onDeleteWebAuthnKey?: (masterPassword: string, keyId: string) => Promise<void>;
+  onRenameWebAuthnKey?: (credentialId: string, name: string) => Promise<WebAuthnKeyInfo[]>;
+  onDisableAllWebAuthn?: (masterPassword: string) => Promise<void>;
+  emailTwoFactorEnabled?: boolean;
+  emailTwoFactorAvailable?: boolean;
+  onDisableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
+}
+
+/** Classify a WebAuthn credential into a display type based on transports/attachment. */
+function getKeyType(key: WebAuthnKeyInfo): { labelKey: string; Icon: typeof KeyRound } {
+  if (key.attachment === 'platform' || key.transports?.includes('internal')) {
+    return { labelKey: 'txt_webauthn_type_platform', Icon: FingerprintPattern };
+  }
+  if (key.transports?.includes('usb')) return { labelKey: 'txt_webauthn_type_usb', Icon: Usb };
+  if (key.transports?.includes('nfc')) return { labelKey: 'txt_webauthn_type_nfc', Icon: Radio };
+  if (key.transports?.includes('ble') || key.transports?.includes('hybrid')) {
+    return { labelKey: 'txt_webauthn_type_ble', Icon: Bluetooth };
+  }
+  return { labelKey: 'txt_webauthn_type_generic', Icon: KeyRound };
 }
 
 const LOCK_TIMEOUT_OPTIONS = [
@@ -95,6 +113,29 @@ export default function SettingsPage(props: SettingsPageProps) {
   const [webAuthnDeleteKeyId, setWebAuthnDeleteKeyId] = useState<string | null>(null);
   const [webAuthnDeleteKeyName, setWebAuthnDeleteKeyName] = useState('');
   const webAuthnSupported = typeof window !== 'undefined' && !!(window.PublicKeyCredential);
+
+  // WebAuthn rename state
+  const [webAuthnRenamingId, setWebAuthnRenamingId] = useState<string | null>(null);
+  const [webAuthnRenameValue, setWebAuthnRenameValue] = useState('');
+  const [webAuthnRenaming, setWebAuthnRenaming] = useState(false);
+
+  // MFA unified panel: disable-all WebAuthn dialog
+  const [disableWebAuthnDialogOpen, setDisableWebAuthnDialogOpen] = useState(false);
+  const [disableWebAuthnPassword, setDisableWebAuthnPassword] = useState('');
+  const [disableWebAuthnSubmitting, setDisableWebAuthnSubmitting] = useState(false);
+
+  // Last-method confirmation gate
+  const [lastMethodDialogOpen, setLastMethodDialogOpen] = useState(false);
+  const [lastMethodPendingAction, setLastMethodPendingAction] = useState<(() => void) | null>(null);
+
+  // Email MFA disable dialog
+  const [emailMfaDisableDialogOpen, setEmailMfaDisableDialogOpen] = useState(false);
+  const [emailMfaDisablePassword, setEmailMfaDisablePassword] = useState('');
+  const [emailMfaDisableSubmitting, setEmailMfaDisableSubmitting] = useState(false);
+
+  // Derived MFA status
+  const mfaEnabled = props.totpEnabled || (props.webAuthnKeys ?? []).length > 0 || !!props.emailTwoFactorEnabled;
+  const activeMethodCount = (props.totpEnabled ? 1 : 0) + ((props.webAuthnKeys ?? []).length > 0 ? 1 : 0) + (!!props.emailTwoFactorEnabled ? 1 : 0);
 
   useEffect(() => {
     clearLegacyTotpSetupSecrets();
@@ -188,6 +229,60 @@ export default function SettingsPage(props: SettingsPageProps) {
     setSelectedLocale(next);
     await setLocale(next);
     window.location.reload();
+  }
+
+  /** Gate: if this would disable the last active MFA method, show confirmation first. */
+  function withLastMethodCheck(action: () => void): void {
+    if (activeMethodCount <= 1) {
+      setLastMethodPendingAction(() => action);
+      setLastMethodDialogOpen(true);
+    } else {
+      action();
+    }
+  }
+
+  async function submitEmailMfaDisable(): Promise<void> {
+    if (!emailMfaDisablePassword.trim() || emailMfaDisableSubmitting) return;
+    setEmailMfaDisableSubmitting(true);
+    try {
+      await props.onDisableEmailTwoFactor?.(emailMfaDisablePassword);
+      props.onNotify?.('success', t('txt_email_mfa_disable_success'));
+      setEmailMfaDisableDialogOpen(false);
+      setEmailMfaDisablePassword('');
+    } catch (e) {
+      props.onNotify?.('error', e instanceof Error ? e.message : t('txt_email_mfa_disable_failed'));
+    } finally {
+      setEmailMfaDisableSubmitting(false);
+    }
+  }
+
+  async function submitRename(): Promise<void> {
+    if (!webAuthnRenamingId || !webAuthnRenameValue.trim() || webAuthnRenaming) return;
+    setWebAuthnRenaming(true);
+    try {
+      await props.onRenameWebAuthnKey?.(webAuthnRenamingId, webAuthnRenameValue.trim());
+      props.onNotify?.('success', t('txt_webauthn_rename_success'));
+      setWebAuthnRenamingId(null);
+    } catch (e) {
+      props.onNotify?.('error', e instanceof Error ? e.message : t('txt_webauthn_rename_failed'));
+    } finally {
+      setWebAuthnRenaming(false);
+    }
+  }
+
+  async function submitDisableAllWebAuthn(): Promise<void> {
+    if (!disableWebAuthnPassword.trim() || disableWebAuthnSubmitting) return;
+    setDisableWebAuthnSubmitting(true);
+    try {
+      await props.onDisableAllWebAuthn?.(disableWebAuthnPassword);
+      props.onNotify?.('success', t('txt_webauthn_delete_success'));
+      setDisableWebAuthnDialogOpen(false);
+      setDisableWebAuthnPassword('');
+    } catch (e) {
+      props.onNotify?.('error', e instanceof Error ? e.message : t('txt_webauthn_disable_all_failed'));
+    } finally {
+      setDisableWebAuthnSubmitting(false);
+    }
   }
 
   function openWebAuthnMasterPasswordPrompt(action: 'register'): void;
@@ -343,80 +438,115 @@ export default function SettingsPage(props: SettingsPageProps) {
         </button>
       </section>
 
-      <section className="card settings-module">
-        <div className="settings-module-head">
-          <h3>{t('txt_totp')}</h3>
-          {totpLocked && (
-            <span className="totp-status-pill">
-              <ShieldCheck size={14} aria-hidden="true" />
-              {t('txt_enabled')}
-            </span>
-          )}
-        </div>
-        <div className="totp-grid">
-          <div className="totp-qr">
-            <img src={qrDataUrl} alt="TOTP QR" />
-          </div>
-          <div>
-            <div>
-              <label className="field">
-                <span>{t('txt_authenticator_key')}</span>
-                <div className="totp-secret-input-wrap">
-                  <input className="input totp-secret-input" value={secret} disabled={totpLocked} onInput={(e) => setSecret((e.currentTarget as HTMLInputElement).value.toUpperCase())} />
-                  <div className="totp-secret-actions">
-                    <button
-                      type="button"
-                      className="btn btn-secondary small totp-secret-icon-btn"
-                      disabled={totpLocked}
-                      title={t('txt_regenerate')}
-                      aria-label={t('txt_regenerate')}
-                      onClick={() => setSecret(randomBase32Secret(32))}
-                    >
-                      <RefreshCw size={14} className="btn-icon" />
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary small totp-secret-icon-btn"
-                      disabled={totpLocked}
-                      title={t('txt_copy_secret')}
-                      aria-label={t('txt_copy_secret')}
-                      onClick={() => {
-                        void copyTextToClipboard(secret, { successMessage: t('txt_secret_copied') });
-                      }}
-                    >
-                      <Clipboard size={14} className="btn-icon" />
-                    </button>
-                  </div>
-                </div>
-              </label>
-              <label className="field">
-                <span>{t('txt_verification_code')}</span>
-                <input className="input" value={token} disabled={totpLocked} onInput={(e) => setToken((e.currentTarget as HTMLInputElement).value)} />
-              </label>
-              <div className="actions">
-                <button type="button" className="btn btn-primary" disabled={totpLocked} onClick={() => void enableTotp()}>
-                  <ShieldCheck size={14} className="btn-icon" />
-                  {totpLocked ? t('txt_enabled') : t('txt_enable_totp')}
-                </button>
-                <button type="button" className="btn btn-danger" disabled={!totpLocked} onClick={props.onOpenDisableTotp}>
-                  <ShieldOff size={14} className="btn-icon" />
-                  {t('txt_disable_totp')}
-                </button>
-              </div>
-            </div>
-          </div>
+      {/* MFA aggregate status banner */}
+      <section className="card settings-module mfa-status-banner">
+        <div className="mfa-status-banner-inner">
+          {mfaEnabled
+            ? <ShieldCheck size={18} aria-hidden="true" className="mfa-status-icon mfa-status-icon--on" />
+            : <ShieldOff size={18} aria-hidden="true" className="mfa-status-icon mfa-status-icon--off" />}
+          <span className={mfaEnabled ? 'mfa-status-text mfa-status-text--on' : 'mfa-status-text mfa-status-text--off'}>
+            {mfaEnabled ? t('txt_mfa_status_enabled') : t('txt_mfa_status_disabled')}
+          </span>
         </div>
       </section>
 
+      {/* TOTP section */}
+      <section className="card settings-module">
+        <div className="settings-module-head">
+          <h3>{t('txt_totp')}</h3>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={totpLocked}
+            className={totpLocked ? 'mfa-toggle mfa-toggle--on' : 'mfa-toggle'}
+            onClick={() => {
+              if (totpLocked) {
+                withLastMethodCheck(() => props.onOpenDisableTotp());
+              }
+              // When off: the setup form below is already visible
+            }}
+            aria-label={totpLocked ? t('txt_disable_totp') : t('txt_enable_totp')}
+          >
+            <span className="mfa-toggle-thumb" />
+          </button>
+        </div>
+        {totpLocked && (
+          <div className="mfa-method-enabled-note">
+            <ShieldCheck size={14} aria-hidden="true" />
+            {t('txt_totp_enabled')}
+          </div>
+        )}
+        {!totpLocked && (
+          <div className="totp-grid">
+            <div className="totp-qr">
+              <img src={qrDataUrl} alt="TOTP QR" />
+            </div>
+            <div>
+              <div>
+                <label className="field">
+                  <span>{t('txt_authenticator_key')}</span>
+                  <div className="totp-secret-input-wrap">
+                    <input className="input totp-secret-input" value={secret} onInput={(e) => setSecret((e.currentTarget as HTMLInputElement).value.toUpperCase())} />
+                    <div className="totp-secret-actions">
+                      <button
+                        type="button"
+                        className="btn btn-secondary small totp-secret-icon-btn"
+                        title={t('txt_regenerate')}
+                        aria-label={t('txt_regenerate')}
+                        onClick={() => setSecret(randomBase32Secret(32))}
+                      >
+                        <RefreshCw size={14} className="btn-icon" />
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary small totp-secret-icon-btn"
+                        title={t('txt_copy_secret')}
+                        aria-label={t('txt_copy_secret')}
+                        onClick={() => {
+                          void copyTextToClipboard(secret, { successMessage: t('txt_secret_copied') });
+                        }}
+                      >
+                        <Clipboard size={14} className="btn-icon" />
+                      </button>
+                    </div>
+                  </div>
+                </label>
+                <label className="field">
+                  <span>{t('txt_verification_code')}</span>
+                  <input className="input" value={token} onInput={(e) => setToken((e.currentTarget as HTMLInputElement).value)} />
+                </label>
+                <div className="actions">
+                  <button type="button" className="btn btn-primary" onClick={() => void enableTotp()}>
+                    <ShieldCheck size={14} className="btn-icon" />
+                    {t('txt_enable_totp')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Security Keys (WebAuthn) section */}
       <section className="card settings-module">
         <div className="settings-module-head">
           <h3>{t('txt_webauthn')}</h3>
-          {(props.webAuthnKeys ?? []).length > 0 && (
-            <span className="totp-status-pill">
-              <ShieldCheck size={14} aria-hidden="true" />
-              {t('txt_webauthn_enabled')}
-            </span>
-          )}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={(props.webAuthnKeys ?? []).length > 0}
+            className={(props.webAuthnKeys ?? []).length > 0 ? 'mfa-toggle mfa-toggle--on' : 'mfa-toggle'}
+            onClick={() => {
+              if ((props.webAuthnKeys ?? []).length > 0) {
+                // Turn off: show disable-all dialog (gated by last-method check)
+                withLastMethodCheck(() => setDisableWebAuthnDialogOpen(true));
+              }
+              // Turn on when no keys: scroll to add-key form below (nothing to toggle, form already visible)
+            }}
+            aria-label={(props.webAuthnKeys ?? []).length > 0 ? t('txt_webauthn_disable_all_title') : t('txt_webauthn_add_key')}
+          >
+            <span className="mfa-toggle-thumb" />
+          </button>
         </div>
 
         {!webAuthnSupported && (
@@ -428,25 +558,83 @@ export default function SettingsPage(props: SettingsPageProps) {
             {(props.webAuthnKeys ?? []).length > 0 && (
               <div className="webauthn-keys-list">
                 <div className="field-label">{t('txt_webauthn_keys')}</div>
-                {(props.webAuthnKeys ?? []).map((key) => (
-                  <div key={key.id} className="webauthn-key-row">
-                    <div className="webauthn-key-info">
-                      <KeyRound size={16} className="webauthn-key-icon" aria-hidden="true" />
-                      <span className="webauthn-key-name">{key.name}</span>
-                      <span className="webauthn-key-date muted-inline">
-                        {t('txt_webauthn_created_at', { date: formatDateTime(key.createdAt) })}
-                      </span>
+                {(props.webAuthnKeys ?? []).map((key) => {
+                  const { labelKey, Icon: TypeIcon } = getKeyType(key);
+                  const isRenaming = webAuthnRenamingId === key.id;
+                  return (
+                    <div key={key.id} className="webauthn-key-row">
+                      <div className="webauthn-key-info">
+                        <TypeIcon size={16} className="webauthn-key-icon" aria-hidden="true" />
+                        {isRenaming ? (
+                          <input
+                            className="input webauthn-rename-input"
+                            value={webAuthnRenameValue}
+                            placeholder={t('txt_webauthn_rename_placeholder')}
+                            aria-label={t('txt_webauthn_rename_placeholder')}
+                            maxLength={64}
+                            onInput={(e) => setWebAuthnRenameValue((e.currentTarget as HTMLInputElement).value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void submitRename();
+                              if (e.key === 'Escape') setWebAuthnRenamingId(null);
+                            }}
+                            autoFocus
+                          />
+                        ) : (
+                          <>
+                            <span className="webauthn-key-name">{key.name}</span>
+                            <span className="webauthn-key-type-badge">{t(labelKey)}</span>
+                          </>
+                        )}
+                        <span className="webauthn-key-date muted-inline">
+                          {t('txt_webauthn_created_at', { date: formatDateTime(key.createdAt) })}
+                        </span>
+                      </div>
+                      <div className="webauthn-key-actions">
+                        {isRenaming ? (
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-primary small"
+                              disabled={webAuthnRenaming || !webAuthnRenameValue.trim()}
+                              onClick={() => void submitRename()}
+                            >
+                              {t('txt_webauthn_rename_save')}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-secondary small"
+                              onClick={() => setWebAuthnRenamingId(null)}
+                            >
+                              {t('txt_webauthn_rename_cancel')}
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-secondary small"
+                              onClick={() => {
+                                setWebAuthnRenamingId(key.id);
+                                setWebAuthnRenameValue(key.name);
+                              }}
+                            >
+                              <Pencil size={12} className="btn-icon" />
+                              {t('txt_webauthn_rename')}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-danger small"
+                              onClick={() => openWebAuthnMasterPasswordPrompt('delete', key.id, key.name)}
+                            >
+                              <Trash2 size={12} className="btn-icon" />
+                              {t('txt_webauthn_delete_key')}
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
-                    <button
-                      type="button"
-                      className="btn btn-danger small"
-                      onClick={() => openWebAuthnMasterPasswordPrompt('delete', key.id, key.name)}
-                    >
-                      <Trash2 size={12} className="btn-icon" />
-                      {t('txt_webauthn_delete_key')}
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 
@@ -478,6 +666,36 @@ export default function SettingsPage(props: SettingsPageProps) {
           </>
         )}
       </section>
+
+      {/* Email 2FA section */}
+      {(props.emailTwoFactorAvailable || props.emailTwoFactorEnabled) && (
+        <section className="card settings-module">
+          <div className="settings-module-head">
+            <h3>{t('txt_email_mfa')}</h3>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={!!props.emailTwoFactorEnabled}
+              className={props.emailTwoFactorEnabled ? 'mfa-toggle mfa-toggle--on' : 'mfa-toggle'}
+              onClick={() => {
+                if (props.emailTwoFactorEnabled) {
+                  withLastMethodCheck(() => setEmailMfaDisableDialogOpen(true));
+                }
+                // Turn on: no action needed; user should go through the normal email-2FA enroll flow
+              }}
+              aria-label={props.emailTwoFactorEnabled ? t('txt_email_mfa_disable') : t('txt_email_mfa')}
+            >
+              <span className="mfa-toggle-thumb" />
+            </button>
+          </div>
+          {props.emailTwoFactorEnabled && (
+            <div className="mfa-method-enabled-note">
+              <ShieldCheck size={14} aria-hidden="true" />
+              {t('txt_email_mfa_enabled')}
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="settings-module sensitive-actions-module">
         <div className="sensitive-actions-grid">
@@ -638,6 +856,82 @@ export default function SettingsPage(props: SettingsPageProps) {
         {webAuthnMasterPasswordPrompt === 'register' && webAuthnRegistering && (
           <p className="muted-inline">{t('txt_webauthn_registering')}</p>
         )}
+      </ConfirmDialog>
+      {/* Disable-all WebAuthn dialog */}
+      <ConfirmDialog
+        open={disableWebAuthnDialogOpen}
+        title={t('txt_webauthn_disable_all_title')}
+        message={t('txt_webauthn_disable_all_msg')}
+        confirmText={t('txt_webauthn_disable_all_title')}
+        cancelText={t('txt_cancel')}
+        danger
+        confirmDisabled={disableWebAuthnSubmitting || !disableWebAuthnPassword.trim()}
+        cancelDisabled={disableWebAuthnSubmitting}
+        onConfirm={() => void submitDisableAllWebAuthn()}
+        onCancel={() => {
+          if (!disableWebAuthnSubmitting) {
+            setDisableWebAuthnDialogOpen(false);
+            setDisableWebAuthnPassword('');
+          }
+        }}
+      >
+        <label className="field">
+          <span>{t('txt_master_password')}</span>
+          <input
+            className="input"
+            type="password"
+            autoComplete="current-password"
+            value={disableWebAuthnPassword}
+            onInput={(e) => setDisableWebAuthnPassword((e.currentTarget as HTMLInputElement).value)}
+          />
+        </label>
+      </ConfirmDialog>
+      {/* Last-method confirmation gate */}
+      <ConfirmDialog
+        open={lastMethodDialogOpen}
+        title={t('txt_mfa_last_method_title')}
+        message={t('txt_mfa_last_method_msg')}
+        confirmText={t('txt_continue')}
+        cancelText={t('txt_cancel')}
+        danger
+        onConfirm={() => {
+          setLastMethodDialogOpen(false);
+          lastMethodPendingAction?.();
+          setLastMethodPendingAction(null);
+        }}
+        onCancel={() => {
+          setLastMethodDialogOpen(false);
+          setLastMethodPendingAction(null);
+        }}
+      />
+      {/* Email MFA disable dialog */}
+      <ConfirmDialog
+        open={emailMfaDisableDialogOpen}
+        title={t('txt_email_mfa_disable_title')}
+        message={t('txt_email_mfa_disable_msg')}
+        confirmText={t('txt_email_mfa_disable')}
+        cancelText={t('txt_cancel')}
+        danger
+        confirmDisabled={emailMfaDisableSubmitting || !emailMfaDisablePassword.trim()}
+        cancelDisabled={emailMfaDisableSubmitting}
+        onConfirm={() => void submitEmailMfaDisable()}
+        onCancel={() => {
+          if (!emailMfaDisableSubmitting) {
+            setEmailMfaDisableDialogOpen(false);
+            setEmailMfaDisablePassword('');
+          }
+        }}
+      >
+        <label className="field">
+          <span>{t('txt_master_password')}</span>
+          <input
+            className="input"
+            type="password"
+            autoComplete="current-password"
+            value={emailMfaDisablePassword}
+            onInput={(e) => setEmailMfaDisablePassword((e.currentTarget as HTMLInputElement).value)}
+          />
+        </label>
       </ConfirmDialog>
     </div>
   );
