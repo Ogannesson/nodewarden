@@ -342,8 +342,12 @@ export async function performPasswordLogin(
     const providers = tokenError.TwoFactorProviders as unknown[];
     const providers2 = tokenError.TwoFactorProviders2 ?? {};
 
+    // Normalise to string keys so we handle both server shapes:
+    // legacy numeric array [0, 7] and current string array ["0", "7"].
+    const providerKeys = (Array.isArray(providers) ? providers : []).map((x) => String(x));
+
     // Prefer WebAuthn (provider 7) when the server advertises it.
-    if (Array.isArray(providers) && providers.includes(7) && providers2['7']) {
+    if (providerKeys.includes('7') && providers2['7']) {
       const p7 = providers2['7'] as Record<string, unknown>;
       const webAuthnChallenge: WebAuthnChallenge = {
         challenge: String(p7['challenge'] ?? ''),
@@ -360,7 +364,7 @@ export async function performPasswordLogin(
           email: normalizedEmail,
           passwordHash: derived.hash,
           masterKey: derived.masterKey,
-          hasTotpFallback: Array.isArray(providers) && providers.includes(0),
+          hasTotpFallback: providerKeys.includes('0'),
           webAuthnChallenge,
         },
       };
@@ -483,7 +487,11 @@ export async function performUnlock(
     const providers = tokenError.TwoFactorProviders as unknown[];
     const providers2 = tokenError.TwoFactorProviders2 ?? {};
 
-    if (Array.isArray(providers) && providers.includes(7) && providers2['7']) {
+    // Normalise to string keys so we handle both server shapes:
+    // legacy numeric array [0, 7] and current string array ["0", "7"].
+    const providerKeys = (Array.isArray(providers) ? providers : []).map((x) => String(x));
+
+    if (providerKeys.includes('7') && providers2['7']) {
       const p7 = providers2['7'] as Record<string, unknown>;
       const webAuthnChallenge: WebAuthnChallenge = {
         challenge: String(p7['challenge'] ?? ''),
@@ -500,7 +508,7 @@ export async function performUnlock(
           email: normalizedEmail,
           passwordHash: derived.hash,
           masterKey: derived.masterKey,
-          hasTotpFallback: Array.isArray(providers) && providers.includes(0),
+          hasTotpFallback: providerKeys.includes('0'),
           webAuthnChallenge,
         },
       };
