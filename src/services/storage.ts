@@ -16,6 +16,7 @@ import {
   getUserById as findStoredUserById,
   getUserCount as countStoredUsers,
   saveUser as saveStoredUser,
+  updateTotpLastCounter as updateStoredTotpLastCounter,
 } from './storage-user-repo';
 import {
   type AuditLogListOptions,
@@ -114,7 +115,9 @@ import {
 import {
   type TwoFactorRow,
   deleteAllTwoFactorsByUserId as deleteStoredAllTwoFactors,
+  deleteTransientTwoFactorsByUserId as deleteStoredTransientTwoFactors,
   deleteTwoFactor as deleteStoredTwoFactor,
+  getEnabledTwoFactorUserIds as findStoredEnabledTwoFactorUserIds,
   getTwoFactor as findStoredTwoFactor,
   getTwoFactorsByUserId as listStoredTwoFactors,
   touchTwoFactorLastUsed as touchStoredTwoFactorLastUsed,
@@ -263,6 +266,11 @@ export class StorageService {
 
   async deleteUserById(id: string): Promise<boolean> {
     return deleteStoredUserById(this.db, id);
+  }
+
+  /** H3: Write back the matched TOTP counter for replay protection. */
+  async updateTotpLastCounter(userId: string, counter: number): Promise<void> {
+    await updateStoredTotpLastCounter(this.db, userId, counter);
   }
 
   async createInvite(invite: Invite): Promise<void> {
@@ -724,7 +732,17 @@ export class StorageService {
     return deleteStoredAllTwoFactors(this.db, userId);
   }
 
+  /** C4: Remove all transient login-challenge rows (atype >= 1000) for a user. */
+  async deleteTransientTwoFactorsByUserId(userId: string): Promise<number> {
+    return deleteStoredTransientTwoFactors(this.db, userId);
+  }
+
   async touchTwoFactorLastUsed(userId: string, atype: number, nowMs: number = Date.now()): Promise<void> {
     await touchStoredTwoFactorLastUsed(this.db, userId, atype, nowMs);
+  }
+
+  /** C3: Return the set of user IDs with at least one active persistent two_factor provider. */
+  async getEnabledTwoFactorUserIds(): Promise<Set<string>> {
+    return findStoredEnabledTwoFactorUserIds(this.db);
   }
 }

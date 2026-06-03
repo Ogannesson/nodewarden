@@ -5,6 +5,8 @@ import {
   loadProfileSnapshot,
   loadSession,
   loginWithPassword,
+  loginWithEmailCode,
+  sendEmailLoginCode,
   refreshAccessToken,
   recoverTwoFactor,
   registerAccount,
@@ -34,7 +36,18 @@ export interface PendingWebAuthn {
   masterKey: Uint8Array;
   /** Whether TOTP is also available as fallback. */
   hasTotpFallback: boolean;
+  /** Whether Email (provider 1) is also available as fallback. */
+  hasEmailFallback: boolean;
   webAuthnChallenge: WebAuthnChallenge;
+}
+
+/** Pending Email 2FA challenge (provider 1). */
+export interface PendingEmail {
+  email: string;
+  passwordHash: string;
+  masterKey: Uint8Array;
+  /** Masked destination address returned by the server (e.g. "u***@example.com"). */
+  maskedEmail: string;
 }
 
 export type JwtUnsafeReason = 'missing' | 'default' | 'too_short';
@@ -66,6 +79,7 @@ export interface CompletedLogin {
 export type PasswordLoginResult =
   | { kind: 'success'; login: CompletedLogin }
   | { kind: 'totp'; pendingTotp: PendingTotp }
+  | { kind: 'email'; pendingEmail: PendingEmail }
   | { kind: 'webauthn'; pendingWebAuthn: PendingWebAuthn }
   | { kind: 'error'; message: string };
 
@@ -365,7 +379,25 @@ export async function performPasswordLogin(
           passwordHash: derived.hash,
           masterKey: derived.masterKey,
           hasTotpFallback: providerKeys.includes('0'),
+          hasEmailFallback: providerKeys.includes('1'),
           webAuthnChallenge,
+        },
+      };
+    }
+
+    // Email 2FA (provider 1) — only triggered when no WebAuthn is available.
+    if (providerKeys.includes('1') && !providerKeys.includes('0')) {
+      const p1 = providers2['1'] as Record<string, unknown> | null | undefined;
+      const maskedEmail = typeof p1?.['email'] === 'string' ? p1['email'] : normalizedEmail;
+      // Trigger the server to send the email OTP immediately.
+      await sendEmailLoginCode(normalizedEmail, derived.hash);
+      return {
+        kind: 'email',
+        pendingEmail: {
+          email: normalizedEmail,
+          passwordHash: derived.hash,
+          masterKey: derived.masterKey,
+          maskedEmail,
         },
       };
     }
@@ -400,6 +432,19 @@ export async function performWebAuthnLogin(
   }
   const tokenError = token as { error_description?: string; error?: string };
   throw new Error(translateServerError(tokenError.error_description || tokenError.error, t('txt_webauthn_assertion_failed')));
+}
+
+export async function performEmailLogin(
+  pendingEmail: PendingEmail,
+  emailCode: string,
+  rememberDevice: boolean
+): Promise<CompletedLogin> {
+  const token = await loginWithEmailCode(pendingEmail.email, pendingEmail.passwordHash, emailCode, rememberDevice);
+  if ('access_token' in token && token.access_token) {
+    return completeLogin(token, pendingEmail.email, pendingEmail.masterKey);
+  }
+  const tokenError = token as { error_description?: string; error?: string };
+  throw new Error(translateServerError(tokenError.error_description || tokenError.error, t('txt_email_otp_verify_failed')));
 }
 
 export async function performTotpLogin(
@@ -509,7 +554,24 @@ export async function performUnlock(
           passwordHash: derived.hash,
           masterKey: derived.masterKey,
           hasTotpFallback: providerKeys.includes('0'),
+          hasEmailFallback: providerKeys.includes('1'),
           webAuthnChallenge,
+        },
+      };
+    }
+
+    // Email 2FA (provider 1) — only triggered when no WebAuthn is available.
+    if (providerKeys.includes('1') && !providerKeys.includes('0')) {
+      const p1 = providers2['1'] as Record<string, unknown> | null | undefined;
+      const maskedEmail = typeof p1?.['email'] === 'string' ? p1['email'] : normalizedEmail;
+      await sendEmailLoginCode(normalizedEmail, derived.hash);
+      return {
+        kind: 'email',
+        pendingEmail: {
+          email: normalizedEmail,
+          passwordHash: derived.hash,
+          masterKey: derived.masterKey,
+          maskedEmail,
         },
       };
     }

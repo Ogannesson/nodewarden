@@ -33,6 +33,7 @@ function makeUser(overrides: Partial<User> = {}): User {
     totpSecret: null,
     totpEnabled: true,
     totpRecoveryCode: null,
+    totpLastCounter: null,
     apiKey: null,
     createdAt: '2023-01-01T00:00:00Z',
     updatedAt: '2023-01-01T00:00:00Z',
@@ -111,6 +112,17 @@ describe('TotpTwoFactorProvider.buildChallenge', () => {
   });
 });
 
+// Minimal DB mock for verify — totp-provider writes back totp_last_counter on success.
+function makeVerifyDb(): D1Database {
+  return {
+    prepare: () => ({
+      bind: (..._args: unknown[]) => ({
+        run: () => Promise.resolve({ meta: { changes: 1 } }),
+      }),
+    }),
+  } as unknown as D1Database;
+}
+
 describe('TotpTwoFactorProvider.verify', () => {
   const TEST_SECRET = 'JBSWY3DPEHPK3PXP';
 
@@ -118,14 +130,14 @@ describe('TotpTwoFactorProvider.verify', () => {
     const user = makeUser({ totpSecret: TEST_SECRET });
     const p = getProvider(TwoFactorType.Authenticator, fakeEnv)!;
     const validToken = await computeHotp(TEST_SECRET, Math.floor(Date.now() / 1000 / 30));
-    const ctx = { user, env: fakeEnv, db: {} as D1Database, twoFactorRows: noRows };
+    const ctx = { user, env: fakeEnv, db: makeVerifyDb(), twoFactorRows: noRows };
     expect(await p.verify(ctx, validToken)).toBe(true);
   });
 
   it('错误 token 应被拒绝', async () => {
     const user = makeUser({ totpSecret: TEST_SECRET });
     const p = getProvider(TwoFactorType.Authenticator, fakeEnv)!;
-    const ctx = { user, env: fakeEnv, db: {} as D1Database, twoFactorRows: noRows };
+    const ctx = { user, env: fakeEnv, db: makeVerifyDb(), twoFactorRows: noRows };
     // 000000 与当前时刻有效 token 碰撞概率 1/1000000
     const currToken = await computeHotp(TEST_SECRET, Math.floor(Date.now() / 1000 / 30));
     if (currToken !== '000000') {
@@ -136,8 +148,35 @@ describe('TotpTwoFactorProvider.verify', () => {
   it('totpSecret 为 null → 直接返回 false', async () => {
     const user = makeUser({ totpSecret: null });
     const p = getProvider(TwoFactorType.Authenticator, fakeEnv)!;
-    const ctx = { user, env: fakeEnv, db: {} as D1Database, twoFactorRows: noRows };
+    const ctx = { user, env: fakeEnv, db: makeVerifyDb(), twoFactorRows: noRows };
     expect(await p.verify(ctx, '123456')).toBe(false);
+  });
+
+  it('H3 重放防护: 同一 token 第二次提交应被拒绝（counter ≤ totpLastCounter）', async () => {
+    const nowCounter = Math.floor(Date.now() / 1000 / 30);
+    const user = makeUser({
+      totpSecret: TEST_SECRET,
+      totpLastCounter: nowCounter, // 当前 counter 已被记录
+    });
+    const p = getProvider(TwoFactorType.Authenticator, fakeEnv)!;
+    // 这个 token 对应当前时间片（counter = nowCounter），已经被用过
+    const usedToken = await computeHotp(TEST_SECRET, nowCounter);
+    const ctx = { user, env: fakeEnv, db: makeVerifyDb(), twoFactorRows: noRows };
+    // counter == totpLastCounter → 重放，应被拒绝
+    expect(await p.verify(ctx, usedToken)).toBe(false);
+  });
+
+  it('H3 重放防护: 新 counter 的 token 应通过（counter > totpLastCounter）', async () => {
+    const prevCounter = Math.floor(Date.now() / 1000 / 30) - 5;
+    const user = makeUser({
+      totpSecret: TEST_SECRET,
+      totpLastCounter: prevCounter, // 过去某个时刻的 counter
+    });
+    const p = getProvider(TwoFactorType.Authenticator, fakeEnv)!;
+    // 当前有效 token（counter > prevCounter）
+    const currentToken = await computeHotp(TEST_SECRET, Math.floor(Date.now() / 1000 / 30));
+    const ctx = { user, env: fakeEnv, db: makeVerifyDb(), twoFactorRows: noRows };
+    expect(await p.verify(ctx, currentToken)).toBe(true);
   });
 });
 

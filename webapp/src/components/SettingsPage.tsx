@@ -43,6 +43,13 @@ interface SettingsPageProps {
   onDisableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
   /** Re-enable email 2FA using only master password (no re-enrollment needed). */
   onReEnableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
+  /** Step 1: send setup verification code to target email. */
+  onSendEmailSetupCode?: (email: string, masterPassword: string) => Promise<void>;
+  /** Step 2: verify OTP code and complete enrollment. */
+  onEnableEmailTwoFactor?: (email: string, masterPassword: string, token: string) => Promise<void>;
+  /** Query error states for display — passed from App */
+  emailTwoFactorQueryError?: boolean;
+  webAuthnKeysQueryError?: boolean;
 }
 
 /** Classify a WebAuthn credential into a display type based on transports/attachment. */
@@ -157,6 +164,13 @@ export default function SettingsPage(props: SettingsPageProps) {
   const [reEnableEmailDialogOpen, setReEnableEmailDialogOpen] = useState(false);
   const [reEnableEmailPassword, setReEnableEmailPassword] = useState('');
   const [reEnableEmailSubmitting, setReEnableEmailSubmitting] = useState(false);
+
+  // Email 2FA initial enrollment wizard (step1 = email+password, step2 = OTP)
+  const [emailSetupStep, setEmailSetupStep] = useState<'idle' | 'step1' | 'step2'>('idle');
+  const [emailSetupEmail, setEmailSetupEmail] = useState('');
+  const [emailSetupPassword, setEmailSetupPassword] = useState('');
+  const [emailSetupToken, setEmailSetupToken] = useState('');
+  const [emailSetupSubmitting, setEmailSetupSubmitting] = useState(false);
 
   // Derived MFA status — based on actively *enabled* methods (not just configured)
   const webAuthnActivelyEnabled = !!(props.webAuthnEnabled ?? ((props.webAuthnKeys ?? []).length > 0));
@@ -347,7 +361,7 @@ export default function SettingsPage(props: SettingsPageProps) {
     setDisableWebAuthnSubmitting(true);
     try {
       await props.onDisableAllWebAuthn?.(disableWebAuthnPassword);
-      props.onNotify?.('success', t('txt_webauthn_delete_success'));
+      props.onNotify?.('success', t('txt_webauthn_disable_all_success'));
       setDisableWebAuthnDialogOpen(false);
       setDisableWebAuthnPassword('');
     } catch (e) {
@@ -613,10 +627,16 @@ export default function SettingsPage(props: SettingsPageProps) {
       <section className="card settings-module">
         <div className="settings-module-head">
           <h3>{t('txt_webauthn')}</h3>
+          {props.webAuthnKeysQueryError && (
+            <span className="mfa-query-error" title={t('txt_webauthn_load_failed')}>
+              ⚠
+            </span>
+          )}
           <button
             type="button"
             role="switch"
             aria-checked={webAuthnActivelyEnabled}
+            disabled={!!props.webAuthnKeysQueryError}
             className={webAuthnActivelyEnabled ? 'mfa-toggle mfa-toggle--on' : 'mfa-toggle'}
             onClick={() => {
               if (webAuthnActivelyEnabled) {
@@ -754,14 +774,20 @@ export default function SettingsPage(props: SettingsPageProps) {
       </section>
 
       {/* Email 2FA section */}
-      {(props.emailTwoFactorAvailable || props.emailTwoFactorEnabled || props.emailTwoFactorConfigured) && (
+      {(props.emailTwoFactorAvailable || props.emailTwoFactorEnabled || props.emailTwoFactorConfigured || props.emailTwoFactorQueryError) && (
         <section className="card settings-module">
           <div className="settings-module-head">
             <h3>{t('txt_email_mfa')}</h3>
+            {props.emailTwoFactorQueryError && (
+              <span className="mfa-query-error" title={t('txt_email_mfa_load_failed')}>
+                ⚠
+              </span>
+            )}
             <button
               type="button"
               role="switch"
               aria-checked={!!props.emailTwoFactorEnabled}
+              disabled={!!props.emailTwoFactorQueryError}
               className={props.emailTwoFactorEnabled ? 'mfa-toggle mfa-toggle--on' : 'mfa-toggle'}
               onClick={() => {
                 if (props.emailTwoFactorEnabled) {
@@ -770,8 +796,13 @@ export default function SettingsPage(props: SettingsPageProps) {
                   // Configured but disabled → re-enable (no re-setup needed)
                   setReEnableEmailDialogOpen(true);
                   setReEnableEmailPassword('');
+                } else if (!props.emailTwoFactorConfigured && props.emailTwoFactorAvailable && props.onSendEmailSetupCode) {
+                  // Not configured → start enrollment wizard
+                  setEmailSetupStep('step1');
+                  setEmailSetupEmail('');
+                  setEmailSetupPassword('');
+                  setEmailSetupToken('');
                 }
-                // Not configured: normal enroll flow (handled elsewhere)
               }}
               aria-label={props.emailTwoFactorEnabled ? t('txt_email_mfa_disable') : (props.emailTwoFactorConfigured ? t('txt_reenable_email_mfa') : t('txt_email_mfa'))}
             >
@@ -788,6 +819,128 @@ export default function SettingsPage(props: SettingsPageProps) {
             <div className="mfa-method-enabled-note" style={{ opacity: 0.7 }}>
               <ShieldOff size={14} aria-hidden="true" />
               {t('txt_email_mfa_configured_but_disabled')}
+            </div>
+          )}
+          {/* Step 1: request setup code */}
+          {emailSetupStep === 'step1' && (
+            <div className="mfa-setup-form" style={{ marginTop: '1rem' }}>
+              <p className="settings-field-note">{t('txt_email_mfa_setup_step1')}</p>
+              <label className="field">
+                <span>{t('txt_email_mfa_setup_email')}</span>
+                <input
+                  className="input"
+                  type="email"
+                  autoComplete="email"
+                  value={emailSetupEmail}
+                  onInput={(e) => setEmailSetupEmail((e.currentTarget as HTMLInputElement).value)}
+                />
+              </label>
+              <label className="field">
+                <span>{t('txt_email_mfa_setup_master_password')}</span>
+                <input
+                  className="input"
+                  type="password"
+                  autoComplete="current-password"
+                  value={emailSetupPassword}
+                  onInput={(e) => setEmailSetupPassword((e.currentTarget as HTMLInputElement).value)}
+                />
+              </label>
+              <div className="actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={emailSetupSubmitting || !emailSetupEmail || !emailSetupPassword}
+                  onClick={() => {
+                    void (async () => {
+                      if (!props.onSendEmailSetupCode) return;
+                      setEmailSetupSubmitting(true);
+                      try {
+                        await props.onSendEmailSetupCode(emailSetupEmail.trim().toLowerCase(), emailSetupPassword);
+                        setEmailSetupStep('step2');
+                        setEmailSetupToken('');
+                        props.onNotify?.('success', t('txt_email_otp_sent_to', { email: emailSetupEmail.trim().toLowerCase() }));
+                      } catch (error) {
+                        props.onNotify?.('error', error instanceof Error ? error.message : t('txt_email_mfa_setup_send_failed'));
+                      } finally {
+                        setEmailSetupSubmitting(false);
+                      }
+                    })();
+                  }}
+                >
+                  {emailSetupSubmitting ? t('txt_email_mfa_setup_sending') : t('txt_email_mfa_send_code')}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={emailSetupSubmitting}
+                  onClick={() => setEmailSetupStep('idle')}
+                >
+                  {t('txt_cancel')}
+                </button>
+              </div>
+            </div>
+          )}
+          {/* Step 2: submit OTP to complete enrollment */}
+          {emailSetupStep === 'step2' && (
+            <div className="mfa-setup-form" style={{ marginTop: '1rem' }}>
+              <p className="settings-field-note">{t('txt_email_mfa_setup_step2', { email: emailSetupEmail.trim().toLowerCase() })}</p>
+              <label className="field">
+                <span>{t('txt_email_otp_code')}</span>
+                <input
+                  className="input"
+                  value={emailSetupToken}
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  onInput={(e) => setEmailSetupToken((e.currentTarget as HTMLInputElement).value)}
+                />
+              </label>
+              <div className="actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={emailSetupSubmitting || !emailSetupToken}
+                  onClick={() => {
+                    void (async () => {
+                      if (!props.onEnableEmailTwoFactor) return;
+                      setEmailSetupSubmitting(true);
+                      try {
+                        await props.onEnableEmailTwoFactor(emailSetupEmail.trim().toLowerCase(), emailSetupPassword, emailSetupToken.trim());
+                        setEmailSetupStep('idle');
+                        setEmailSetupEmail('');
+                        setEmailSetupPassword('');
+                        setEmailSetupToken('');
+                        props.onNotify?.('success', t('txt_email_mfa_setup_success'));
+                      } catch (error) {
+                        props.onNotify?.('error', error instanceof Error ? error.message : t('txt_email_mfa_setup_verify_failed'));
+                      } finally {
+                        setEmailSetupSubmitting(false);
+                      }
+                    })();
+                  }}
+                >
+                  {emailSetupSubmitting ? t('txt_email_mfa_setup_verifying') : t('txt_email_mfa_verify_and_enable')}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={emailSetupSubmitting}
+                  onClick={() => {
+                    // Go back to step 1 to resend
+                    setEmailSetupStep('step1');
+                    setEmailSetupToken('');
+                  }}
+                >
+                  {t('txt_email_otp_resend')}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={emailSetupSubmitting}
+                  onClick={() => setEmailSetupStep('idle')}
+                >
+                  {t('txt_cancel')}
+                </button>
+              </div>
             </div>
           )}
         </section>

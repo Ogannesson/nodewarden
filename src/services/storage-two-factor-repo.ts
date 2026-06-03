@@ -44,6 +44,19 @@ function rowToTwoFactor(raw: RawRow): TwoFactorRow {
   };
 }
 
+/**
+ * Return the set of user IDs that have at least one enabled persistent two_factor row.
+ *
+ * C3: Used by admin list to accurately report twoFactorEnabled for all users at once,
+ * avoiding an N+1 per-user query. Only persistent rows (atype < 1000) count.
+ */
+export async function getEnabledTwoFactorUserIds(db: D1Database): Promise<Set<string>> {
+  const result = await db
+    .prepare('SELECT DISTINCT user_id FROM two_factors WHERE enabled = 1 AND atype < 1000')
+    .all<{ user_id: string }>();
+  return new Set((result.results ?? []).map(r => r.user_id));
+}
+
 /** Return all two_factor rows for a user, any enabled state. */
 export async function getTwoFactorsByUserId(db: D1Database, userId: string): Promise<TwoFactorRow[]> {
   const result = await db
@@ -96,6 +109,22 @@ export async function deleteTwoFactor(db: D1Database, userId: string, atype: num
 export async function deleteAllTwoFactorsByUserId(db: D1Database, userId: string): Promise<number> {
   const result = await db
     .prepare('DELETE FROM two_factors WHERE user_id = ?')
+    .bind(userId)
+    .run();
+  return result.meta?.changes ?? 0;
+}
+
+/**
+ * Delete all transient challenge rows for a user (atype >= 1000).
+ *
+ * C4: Called after a successful TOTP/WebAuthn login to clean up any pending
+ * Email OTP challenge rows. Prevents a previously-issued Email OTP from being
+ * replayed through provider=1 after the user has already authenticated with
+ * a different factor.
+ */
+export async function deleteTransientTwoFactorsByUserId(db: D1Database, userId: string): Promise<number> {
+  const result = await db
+    .prepare('DELETE FROM two_factors WHERE user_id = ? AND atype >= 1000')
     .bind(userId)
     .run();
   return result.meta?.changes ?? 0;

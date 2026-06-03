@@ -4,7 +4,7 @@ type SafeBind = (stmt: D1PreparedStatement, ...values: any[]) => D1PreparedState
 const USER_SELECT_COLUMNS =
   'id, email, name, master_password_hint, master_password_hash, key, private_key, public_key, ' +
   'kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, role, status, verify_devices, ' +
-  'totp_secret, totp_enabled, totp_recovery_code, api_key, created_at, updated_at';
+  'totp_secret, totp_enabled, totp_recovery_code, totp_last_counter, api_key, created_at, updated_at';
 
 function mapUserRow(row: any): User {
   return {
@@ -28,6 +28,7 @@ function mapUserRow(row: any): User {
     // totp_enabled defaults to 1 in the DB; treat NULL (pre-migration rows) as enabled.
     totpEnabled: row.totp_enabled == null ? true : row.totp_enabled !== 0,
     totpRecoveryCode: row.totp_recovery_code ?? null,
+    totpLastCounter: row.totp_last_counter ?? null,
     apiKey: row.api_key ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -143,4 +144,18 @@ export async function createFirstUser(db: D1Database, safeBind: SafeBind, user: 
 export async function deleteUserById(db: D1Database, id: string): Promise<boolean> {
   const result = await db.prepare('DELETE FROM users WHERE id = ?').bind(id).run();
   return (result.meta.changes ?? 0) > 0;
+}
+
+/**
+ * Update only the totp_last_counter column for replay protection.
+ *
+ * Called by TotpTwoFactorProvider.verify after a successful TOTP validation,
+ * before the access token is issued. This single-column update avoids re-running
+ * the full saveUser upsert (which requires the safeBind helper).
+ */
+export async function updateTotpLastCounter(db: D1Database, userId: string, counter: number): Promise<void> {
+  await db
+    .prepare('UPDATE users SET totp_last_counter = ?, updated_at = ? WHERE id = ?')
+    .bind(counter, new Date().toISOString(), userId)
+    .run();
 }

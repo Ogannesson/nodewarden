@@ -17,6 +17,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('@/lib/api/auth', () => ({
   deriveLoginHashLocally: vi.fn(),
   loginWithPassword: vi.fn(),
+  loginWithEmailCode: vi.fn(),
+  sendEmailLoginCode: vi.fn().mockResolvedValue(undefined),
   createAuthedFetch: vi.fn(() => vi.fn()),
   getProfile: vi.fn(),
   loadProfileSnapshot: vi.fn(() => null),
@@ -37,7 +39,7 @@ vi.mock('@/lib/i18n', () => ({
 }));
 
 import { performPasswordLogin, performUnlock } from '@/lib/app-auth';
-import { deriveLoginHashLocally, loginWithPassword, unlockVaultKey } from '@/lib/api/auth';
+import { deriveLoginHashLocally, loginWithPassword, sendEmailLoginCode, unlockVaultKey } from '@/lib/api/auth';
 import type { SessionState } from '@/lib/types';
 
 // -----------------------------------------------------------------------
@@ -122,6 +124,9 @@ beforeEach(() => {
     symEncKey: new Uint8Array(32),
     symMacKey: new Uint8Array(32),
   });
+
+  // sendEmailLoginCode 默认成功（不实际发邮件）
+  (sendEmailLoginCode as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
 });
 
 // -----------------------------------------------------------------------
@@ -162,13 +167,13 @@ describe('performPasswordLogin – WebAuthn 挑战识别', () => {
     expect(result.kind).toBe('totp');
   });
 
-  it('服务端只返回 ["1"]（Email 2FA）→ kind=totp（无 WebAuthn fallthrough）', async () => {
+  it('服务端只返回 ["1"]（Email 2FA）→ kind=email（触发发码后返回 pendingEmail）', async () => {
     (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue(makeEmailOnlyChallengeResponse());
 
     const result = await performPasswordLogin('user@example.com', 'password', 600000);
 
-    // Email-only 服务端没有 provider 7 数据，应 fallthrough 到 totp
-    expect(result.kind).toBe('totp');
+    // Email-only（provider 1，无 TOTP/WebAuthn）→ kind=email
+    expect(result.kind).toBe('email');
   });
 
   it('仅含 ["7"] 无 TOTP → kind=webauthn，hasTotpFallback=false', async () => {
@@ -250,11 +255,11 @@ describe('performUnlock – WebAuthn 挑战识别', () => {
     expect(result.kind).toBe('totp');
   });
 
-  it('服务端只返回 ["1"]（Email 2FA）→ kind=totp', async () => {
+  it('服务端只返回 ["1"]（Email 2FA）→ kind=email', async () => {
     (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue(makeEmailOnlyChallengeResponse());
 
     const result = await performUnlock(MOCK_SESSION, null, 'password', 600000);
 
-    expect(result.kind).toBe('totp');
+    expect(result.kind).toBe('email');
   });
 });

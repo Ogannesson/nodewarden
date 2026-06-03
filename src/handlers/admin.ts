@@ -68,7 +68,12 @@ export async function handleAdminListUsers(
   }
 
   const storage = new StorageService(env.DB);
-  const users = await storage.getAllUsers();
+  // C3: Load all users and the set of user IDs with any active non-TOTP 2FA provider
+  // in a single parallel query to avoid N+1 per-user calls.
+  const [users, twoFactorUserIds] = await Promise.all([
+    storage.getAllUsers(),
+    storage.getEnabledTwoFactorUserIds(),
+  ]);
   return jsonResponse({
     data: users.map(user => ({
       id: user.id,
@@ -76,7 +81,10 @@ export async function handleAdminListUsers(
       name: user.name,
       role: user.role,
       status: user.status,
-      twoFactorEnabled: !!user.totpSecret,
+      // C3: twoFactorEnabled is true if TOTP is active OR any WebAuthn/Email provider is enabled.
+      twoFactorEnabled:
+        (!!user.totpSecret && user.totpEnabled !== false) ||
+        twoFactorUserIds.has(user.id),
       creationDate: user.createdAt,
       revisionDate: user.updatedAt,
       object: 'user',

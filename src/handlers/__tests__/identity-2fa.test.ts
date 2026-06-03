@@ -70,6 +70,8 @@ const mockStorage = {
   getTwoFactorsByUserId: vi.fn(() => Promise.resolve([])),
   // P1: called when recovery code disables ALL 2FA providers (account-level escape hatch)
   deleteAllTwoFactorsByUserId: vi.fn(() => Promise.resolve(0)),
+  // C4: called after successful login to clean up transient Email OTP challenge rows
+  deleteTransientTwoFactorsByUserId: vi.fn(() => Promise.resolve(0)),
 };
 
 const mockAuth = {
@@ -112,6 +114,7 @@ function makeActiveUser(overrides: Partial<User> = {}): User {
     totpSecret: null,
     totpEnabled: true,
     totpRecoveryCode: null,
+    totpLastCounter: null,
     apiKey: null,
     createdAt: '2023-01-01T00:00:00Z',
     updatedAt: '2023-01-01T00:00:00Z',
@@ -145,9 +148,20 @@ function makeRequest(body: string, headers: Record<string, string> = {}): Reques
   });
 }
 
+/** 最小化 DB mock：支持 TOTP provider 写回 totp_last_counter */
+const fakeDb = {
+  prepare: (_sql: string) => ({
+    bind: (..._args: unknown[]) => ({
+      run: () => Promise.resolve({ meta: { changes: 1 } }),
+      first: () => Promise.resolve(null),
+      all: () => Promise.resolve({ results: [] }),
+    }),
+  }),
+} as unknown as D1Database;
+
 /** 最小化 Env mock */
 const fakeEnv = {
-  DB: {} as D1Database,
+  DB: fakeDb,
   JWT_SECRET: 'test-secret-at-least-32-characters-long',
   NOTIFICATIONS_HUB: {} as DurableObjectNamespace,
 };
@@ -597,6 +611,113 @@ describe('handleToken (password grant) – remember token 颁发', () => {
     expect(resp.status).toBe(200);
     const body = await parseBody(resp);
     expect(body.TwoFactorToken).toBeUndefined();
+  });
+});
+
+// -----------------------------------------------------------------------
+// H2: Email buildChallenge 失败韧性测试
+// -----------------------------------------------------------------------
+
+describe('handleToken (password grant) – H2: buildChallenge 韧性', () => {
+  const TEST_SECRET = 'JBSWY3DPEHPK3PXP';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRateLimit.checkLoginAttempt.mockResolvedValue({ allowed: true });
+    mockRateLimit.recordFailedLogin.mockResolvedValue({ locked: false });
+    mockAuth.verifyPassword.mockResolvedValue(true);
+    mockAuth.generateAccessToken.mockResolvedValue('test-access-token');
+    mockAuth.generateRefreshToken.mockResolvedValue('test-refresh-token');
+    mockStorage.getDevice.mockResolvedValue(null);
+    mockStorage.deleteTransientTwoFactorsByUserId.mockResolvedValue(0);
+  });
+
+  it('Email buildChallenge 抛异常时，TOTP 用户仍拿到正常 400 挑战响应', async () => {
+    // 用户同时启用了 TOTP 和 Email 2FA
+    const user = makeActiveUser({
+      totpSecret: TEST_SECRET,
+      totpRecoveryCode: 'ABCD EFGH IJKL MNOP QRST UVWX YZ23 4567',
+    });
+    mockStorage.getUser.mockResolvedValue(user);
+
+    // Email provider 的 two_factors 行：atype=1, enabled=true
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mockStorage.getTwoFactorsByUserId as any).mockResolvedValue([
+      {
+        userId: user.id,
+        atype: 1, // Email enrollment
+        enabled: true,
+        data: JSON.stringify({ email: 'test@example.com' }),
+        lastUsed: null,
+        createdAt: '2023-01-01T00:00:00Z',
+        updatedAt: '2023-01-01T00:00:00Z',
+      },
+    ]);
+
+    // 注意：Email provider 的 buildChallenge 会调用 email sender；
+    // fakeEnv 没有 RESEND_API_KEY，所以 buildChallenge 会抛异常
+    // → 期望：TOTP provider 的挑战仍然正常返回，整体返回 400（不是 500）
+
+    const req = makeRequest(makePasswordBody({}));
+    const resp = await handleToken(req, fakeEnv as unknown as typeof fakeEnv & { DB: D1Database });
+
+    // 必须是 400（2FA 挑战），而不是 500（未捕获异常）
+    expect(resp.status).toBe(400);
+    const body = await parseBody(resp);
+    expect(body.error).toBe('invalid_grant');
+    // TOTP（provider 0）仍必须出现在挑战列表中
+    const providers = body.TwoFactorProviders as string[];
+    expect(providers).toContain('0');
+    // 恢复码 (-1) 也应出现（用户有 totpRecoveryCode）
+    expect(providers).toContain('-1');
+  });
+});
+
+// -----------------------------------------------------------------------
+// C4: 成功登录后清理 transient challenge 行测试
+// -----------------------------------------------------------------------
+
+describe('handleToken (password grant) – C4: transient challenge 清理', () => {
+  const TEST_SECRET = 'JBSWY3DPEHPK3PXP';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRateLimit.checkLoginAttempt.mockResolvedValue({ allowed: true });
+    mockRateLimit.recordFailedLogin.mockResolvedValue({ locked: false });
+    mockAuth.verifyPassword.mockResolvedValue(true);
+    mockAuth.generateAccessToken.mockResolvedValue('test-access-token');
+    mockAuth.generateRefreshToken.mockResolvedValue('test-refresh-token');
+    mockStorage.getDevice.mockResolvedValue(null);
+    mockStorage.deleteTransientTwoFactorsByUserId.mockResolvedValue(0);
+  });
+
+  it('TOTP 登录成功后应调用 deleteTransientTwoFactorsByUserId 清理 Email OTP 行', async () => {
+    const user = makeActiveUser({ totpSecret: TEST_SECRET });
+    mockStorage.getUser.mockResolvedValue(user);
+
+    const validToken = await computeHotp(TEST_SECRET, Math.floor(Date.now() / 1000 / 30));
+
+    const req = makeRequest(makePasswordBody({
+      twoFactorProvider: '0',
+      twoFactorToken: validToken,
+    }));
+    const resp = await handleToken(req, fakeEnv as unknown as typeof fakeEnv & { DB: D1Database });
+
+    expect(resp.status).toBe(200);
+    // C4: 成功登录后必须清理 transient 行
+    expect(mockStorage.deleteTransientTwoFactorsByUserId).toHaveBeenCalledWith(user.id);
+  });
+
+  it('无 2FA 用户登录成功后也应清理 transient challenge 行（防残留）', async () => {
+    const user = makeActiveUser({ totpSecret: null });
+    mockStorage.getUser.mockResolvedValue(user);
+
+    const req = makeRequest(makePasswordBody({}));
+    const resp = await handleToken(req, fakeEnv as unknown as typeof fakeEnv & { DB: D1Database });
+
+    expect(resp.status).toBe(200);
+    // 即使没有 2FA，也应调用清理（用户可能之前有过 Email challenge 残留）
+    expect(mockStorage.deleteTransientTwoFactorsByUserId).toHaveBeenCalledWith(user.id);
   });
 });
 

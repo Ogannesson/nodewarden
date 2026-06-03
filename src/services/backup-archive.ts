@@ -386,6 +386,13 @@ export function validateBackupPayloadContents(
     if (!Number.isFinite(atype)) {
       throw new Error(`Backup archive contains a two_factor row with invalid atype: ${row.atype}`);
     }
+    // H6: Reject transient challenge rows — they should never appear in a backup
+    // (export already filters them) but we defend in depth at import validation too.
+    // atype >= 1000 indicates a login-challenge row (Email OTP, WebAuthn challenge, etc.)
+    // that could be used to inject a pre-placed challenge into the restored account.
+    if (atype >= 1000) {
+      throw new Error(`Backup archive contains a transient two_factor row (atype=${atype}) that must not be imported.`);
+    }
   }
 }
 
@@ -413,7 +420,11 @@ export async function buildBackupArchive(
     queryRows(env.DB, 'SELECT id, user_id, name, created_at, updated_at FROM folders ORDER BY created_at ASC'),
     queryRows(env.DB, 'SELECT id, user_id, type, folder_id, name, notes, favorite, data, reprompt, key, created_at, updated_at, archived_at, deleted_at FROM ciphers ORDER BY created_at ASC'),
     queryRows(env.DB, 'SELECT id, cipher_id, file_name, size, size_name, key FROM attachments ORDER BY cipher_id ASC, id ASC'),
-    queryRows(env.DB, 'SELECT user_id, atype, enabled, data, last_used, created_at, updated_at FROM two_factors ORDER BY user_id ASC, atype ASC').catch(() => [] as SqlRow[]),
+    // H5: Exclude transient login-challenge rows (atype 1002 = Email OTP challenge,
+    // 1003/1004 = WebAuthn login challenge). These are ephemeral and must NOT be
+    // included in backups — they may contain live OTP codes and have no meaning
+    // outside the current session.
+    queryRows(env.DB, 'SELECT user_id, atype, enabled, data, last_used, created_at, updated_at FROM two_factors WHERE atype NOT IN (1002, 1003, 1004) ORDER BY user_id ASC, atype ASC').catch(() => [] as SqlRow[]),
   ]);
   const exportedConfigRows = sanitizeConfigRowsForExport(configRows);
   const exportedAttachmentRows = includeAttachments ? attachmentRows : [];

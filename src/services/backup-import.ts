@@ -288,6 +288,21 @@ async function prepareImportedConfigRows(
 }
 
 async function importPreparedBackupRows(db: D1Database, payload: BackupPayload['db'], env: Env): Promise<BackupPayload['db']> {
+  // H6: two_factors was previously omitted from preparedDb, causing the importBackupRows
+  // guard (`payload.two_factors && ...`) to always be falsy → MFA rows silently dropped.
+  // Fix: include two_factors in preparedDb, filtering out transient challenge rows
+  // (atype >= 1000) to prevent injection of live OTP challenges into imported data.
+  const rawTwoFactors = cloneRows(payload.two_factors || []);
+  const safeTwoFactors = rawTwoFactors.filter((row) => {
+    const atype = Number(row.atype);
+    if (atype >= 1000) {
+      // Reject transient challenge rows — they have no meaning outside the originating
+      // session and must not be imported (prevents pre-placed challenge injection).
+      return false;
+    }
+    return true;
+  });
+
   const preparedDb: BackupPayload['db'] = {
     config: await prepareImportedConfigRows(env, payload.config || [], payload.users || []),
     users: cloneRows(payload.users || []).map((row) => ({
@@ -302,6 +317,8 @@ async function importPreparedBackupRows(db: D1Database, payload: BackupPayload['
       archived_at: row.archived_at ?? null,
     })),
     attachments: cloneRows(payload.attachments || []),
+    // H6: two_factors now properly included (was missing, causing MFA to be silently dropped).
+    two_factors: safeTwoFactors,
   };
   await importBackupRows(db, preparedDb, true);
   return preparedDb;
@@ -720,6 +737,8 @@ export async function importBackupArchiveBytes(
       folders: (db.folders || []).length,
       ciphers: (db.ciphers || []).length,
       attachments: (db.attachments || []).length,
+      // H6: Include two_factors in count validation so MFA row imports are verified.
+      two_factors: (db.two_factors || []).length,
     });
 
     await progress?.({
@@ -742,6 +761,8 @@ export async function importBackupArchiveBytes(
       folders: (db.folders || []).length,
       ciphers: (db.ciphers || []).length,
       attachments: restored.restoredAttachments.length,
+      // H6: two_factors rows count verified after file restoration step.
+      two_factors: (db.two_factors || []).length,
     });
     await progress?.({
       source: 'local',
@@ -859,6 +880,8 @@ export async function importRemoteBackupArchiveBytes(
       folders: (db.folders || []).length,
       ciphers: (db.ciphers || []).length,
       attachments: (db.attachments || []).length,
+      // H6: Include two_factors in count validation so MFA row imports are verified.
+      two_factors: (db.two_factors || []).length,
     });
 
     await progress?.({
@@ -881,6 +904,8 @@ export async function importRemoteBackupArchiveBytes(
       folders: (db.folders || []).length,
       ciphers: (db.ciphers || []).length,
       attachments: restored.restoredAttachments.length,
+      // H6: two_factors rows count verified after file restoration step.
+      two_factors: (db.two_factors || []).length,
     });
     await progress?.({
       source: 'remote',

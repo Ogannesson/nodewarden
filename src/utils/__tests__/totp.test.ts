@@ -43,49 +43,57 @@ describe('isTotpEnabled', () => {
   });
 });
 
+// NOTE: verifyTotpToken now returns the matched counter (number) on success, or null on failure.
+// Tests use toBeNull() for failure and expect.any(Number) / not.toBeNull() for success.
+
 describe('verifyTotpToken – 输入格式校验', () => {
-  it('非6位数字（字母）返回 false', async () => {
-    expect(await verifyTotpToken(TEST_SECRET, 'abcdef', FIXED_NOW_MS)).toBe(false);
+  it('非6位数字（字母）返回 null', async () => {
+    expect(await verifyTotpToken(TEST_SECRET, 'abcdef', FIXED_NOW_MS)).toBeNull();
   });
 
-  it('非6位数字（5位）返回 false', async () => {
-    expect(await verifyTotpToken(TEST_SECRET, '12345', FIXED_NOW_MS)).toBe(false);
+  it('非6位数字（5位）返回 null', async () => {
+    expect(await verifyTotpToken(TEST_SECRET, '12345', FIXED_NOW_MS)).toBeNull();
   });
 
-  it('非6位数字（7位）返回 false', async () => {
-    expect(await verifyTotpToken(TEST_SECRET, '1234567', FIXED_NOW_MS)).toBe(false);
+  it('非6位数字（7位）返回 null', async () => {
+    expect(await verifyTotpToken(TEST_SECRET, '1234567', FIXED_NOW_MS)).toBeNull();
   });
 
-  it('空字符串返回 false', async () => {
-    expect(await verifyTotpToken(TEST_SECRET, '', FIXED_NOW_MS)).toBe(false);
+  it('空字符串返回 null', async () => {
+    expect(await verifyTotpToken(TEST_SECRET, '', FIXED_NOW_MS)).toBeNull();
   });
 
-  it('无效 base32 密钥返回 false', async () => {
-    expect(await verifyTotpToken('!@#$%^', '123456', FIXED_NOW_MS)).toBe(false);
+  it('无效 base32 密钥返回 null', async () => {
+    expect(await verifyTotpToken('!@#$%^', '123456', FIXED_NOW_MS)).toBeNull();
   });
 
-  it('空密钥返回 false', async () => {
-    expect(await verifyTotpToken('', '123456', FIXED_NOW_MS)).toBe(false);
+  it('空密钥返回 null', async () => {
+    expect(await verifyTotpToken('', '123456', FIXED_NOW_MS)).toBeNull();
   });
 });
 
 describe('verifyTotpToken – 正确 token 验证', () => {
-  it('正确 token 在固定时刻通过验证', async () => {
-    // 通过与实现相同的算法生成参考值，然后验证实现接受它
-    const expectedToken = await computeHotp(TEST_SECRET, Math.floor(FIXED_NOW_MS / 1000 / 30));
-    expect(await verifyTotpToken(TEST_SECRET, expectedToken, FIXED_NOW_MS)).toBe(true);
+  it('正确 token 在固定时刻通过验证，返回匹配的 counter 值（非 null 数字）', async () => {
+    const base = Math.floor(FIXED_NOW_MS / 1000 / 30);
+    const expectedToken = await computeHotp(TEST_SECRET, base);
+    const result = await verifyTotpToken(TEST_SECRET, expectedToken, FIXED_NOW_MS);
+    expect(result).not.toBeNull();
+    expect(typeof result).toBe('number');
+    expect(result).toBe(base);
   });
 
-  it('前一步长（-30s）的 token 在时间窗口内被接受', async () => {
+  it('前一步长（-30s）的 token 在时间窗口内被接受，返回 prevCounter', async () => {
     const prevCounter = Math.floor(FIXED_NOW_MS / 1000 / 30) - 1;
     const prevToken = await computeHotp(TEST_SECRET, prevCounter);
-    expect(await verifyTotpToken(TEST_SECRET, prevToken, FIXED_NOW_MS)).toBe(true);
+    const result = await verifyTotpToken(TEST_SECRET, prevToken, FIXED_NOW_MS);
+    expect(result).toBe(prevCounter);
   });
 
-  it('下一步长（+30s）的 token 在时间窗口内被接受', async () => {
+  it('下一步长（+30s）的 token 在时间窗口内被接受，返回 nextCounter', async () => {
     const nextCounter = Math.floor(FIXED_NOW_MS / 1000 / 30) + 1;
     const nextToken = await computeHotp(TEST_SECRET, nextCounter);
-    expect(await verifyTotpToken(TEST_SECRET, nextToken, FIXED_NOW_MS)).toBe(true);
+    const result = await verifyTotpToken(TEST_SECRET, nextToken, FIXED_NOW_MS);
+    expect(result).toBe(nextCounter);
   });
 });
 
@@ -111,7 +119,7 @@ describe('verifyTotpToken – 时间窗口边界', () => {
     // If this assertion fails, pick a different FIXED_NOW_MS.
     expect([prev, curr, next]).not.toContain(far);
 
-    expect(await verifyTotpToken(TEST_SECRET, far, FIXED_NOW_MS)).toBe(false);
+    expect(await verifyTotpToken(TEST_SECRET, far, FIXED_NOW_MS)).toBeNull();
   });
 
   it('超出窗口（-2步长）の token 被拒绝（固定时间点，无碰撞依赖）', async () => {
@@ -125,7 +133,7 @@ describe('verifyTotpToken – 时间窗口边界', () => {
 
     expect([prev, curr, next]).not.toContain(far);
 
-    expect(await verifyTotpToken(TEST_SECRET, far, FIXED_NOW_MS)).toBe(false);
+    expect(await verifyTotpToken(TEST_SECRET, far, FIXED_NOW_MS)).toBeNull();
   });
 });
 
@@ -133,7 +141,8 @@ describe('verifyTotpToken – token 规格化（含空格）', () => {
   it('带空格的6位数字应被接受（规格化后验证）', async () => {
     const currToken = await computeHotp(TEST_SECRET, Math.floor(FIXED_NOW_MS / 1000 / 30));
     const tokenWithSpace = currToken.slice(0, 3) + ' ' + currToken.slice(3);
-    expect(await verifyTotpToken(TEST_SECRET, tokenWithSpace, FIXED_NOW_MS)).toBe(true);
+    // H3: returns matched counter (non-null) on success
+    expect(await verifyTotpToken(TEST_SECRET, tokenWithSpace, FIXED_NOW_MS)).not.toBeNull();
   });
 });
 
@@ -142,13 +151,13 @@ describe('verifyTotpToken – 密钥规格化', () => {
     // JBSWY3DPEHPK3PXP 分段加连字符
     const secretWithDash = 'JBSWY3DP-EHPK3PXP';
     const currToken = await computeHotp(TEST_SECRET, Math.floor(FIXED_NOW_MS / 1000 / 30));
-    expect(await verifyTotpToken(secretWithDash, currToken, FIXED_NOW_MS)).toBe(true);
+    expect(await verifyTotpToken(secretWithDash, currToken, FIXED_NOW_MS)).not.toBeNull();
   });
 
   it('小写密钥应被接受（规格化为大写）', async () => {
     const lowerSecret = TEST_SECRET.toLowerCase();
     const currToken = await computeHotp(TEST_SECRET, Math.floor(FIXED_NOW_MS / 1000 / 30));
-    expect(await verifyTotpToken(lowerSecret, currToken, FIXED_NOW_MS)).toBe(true);
+    expect(await verifyTotpToken(lowerSecret, currToken, FIXED_NOW_MS)).not.toBeNull();
   });
 });
 

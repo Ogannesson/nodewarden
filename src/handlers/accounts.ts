@@ -7,7 +7,7 @@ import { jsonResponse, errorResponse } from '../utils/response';
 import { generateUUID } from '../utils/uuid';
 import { LIMITS } from '../config/limits';
 import { isTotpEnabled, verifyTotpToken } from '../utils/totp';
-import { createRecoveryCode, recoveryCodeEquals } from '../utils/recovery-code';
+import { createRecoveryCode, hashRecoveryCode, recoveryCodeEquals } from '../utils/recovery-code';
 import { buildAccountKeys } from '../utils/user-decryption';
 import {
   getTwoFactor,
@@ -104,9 +104,13 @@ async function verifyUserSecret(
   return auth.verifyPassword(normalized, user.masterPasswordHash, user.email);
 }
 
-function toProfile(user: User, env: Env): ProfileResponse {
+function toProfile(user: User, env: Env, twoFactorRows: import('../services/storage-two-factor-repo').TwoFactorRow[] = []): ProfileResponse {
   void env;
   const accountKeys = buildAccountKeys(user);
+  // C3: twoFactorEnabled reflects any active provider, not just TOTP.
+  const twoFactorEnabled =
+    (!!user.totpSecret && user.totpEnabled !== false) ||
+    twoFactorRows.some(r => r.enabled && r.atype < 1000);
   return {
     id: user.id,
     name: user.name,
@@ -117,7 +121,7 @@ function toProfile(user: User, env: Env): ProfileResponse {
     usesKeyConnector: false,
     masterPasswordHint: user.masterPasswordHint,
     culture: 'en-US',
-    twoFactorEnabled: !!user.totpSecret,
+    twoFactorEnabled,
     key: user.key,
     privateKey: user.privateKey,
     accountKeys,
@@ -229,6 +233,7 @@ export async function handleRegister(request: Request, env: Env): Promise<Respon
     totpSecret: null,
     totpEnabled: true,
     totpRecoveryCode: null,
+    totpLastCounter: null,
     apiKey: null,
     createdAt: now,
     updatedAt: now,
@@ -365,15 +370,21 @@ export async function handleGetPasswordHint(request: Request, env: Env): Promise
 export async function handleGetProfile(request: Request, env: Env, userId: string): Promise<Response> {
   void request;
   const storage = new StorageService(env.DB);
-  const user = await storage.getUserById(userId);
+  const [user, twoFactorRows] = await Promise.all([
+    storage.getUserById(userId),
+    storage.getTwoFactorsByUserId(userId),
+  ]);
   if (!user) return errorResponse('User not found', 404);
-  return jsonResponse(toProfile(user, env));
+  return jsonResponse(toProfile(user, env, twoFactorRows));
 }
 
 // PUT /api/accounts/profile
 export async function handleUpdateProfile(request: Request, env: Env, userId: string): Promise<Response> {
   const storage = new StorageService(env.DB);
-  const user = await storage.getUserById(userId);
+  const [user, twoFactorRows] = await Promise.all([
+    storage.getUserById(userId),
+    storage.getTwoFactorsByUserId(userId),
+  ]);
   if (!user) return errorResponse('User not found', 404);
 
   let body: {
@@ -406,7 +417,7 @@ export async function handleUpdateProfile(request: Request, env: Env, userId: st
     },
   });
 
-  return jsonResponse(toProfile(user, env));
+  return jsonResponse(toProfile(user, env, twoFactorRows));
 }
 
 // PUT/POST /api/accounts/verify-devices
@@ -647,7 +658,9 @@ export async function handleSetTotpStatus(request: Request, env: Env, userId: st
       user.totpSecret = normalizedSecret;
       user.totpEnabled = true;
       if (!user.totpRecoveryCode) {
-        user.totpRecoveryCode = createRecoveryCode();
+        // H4: Store hash, not plaintext. The code was previously shown to the user
+        // at TOTP-setup initiation; no need to re-display here.
+        user.totpRecoveryCode = await hashRecoveryCode(createRecoveryCode());
       }
       user.updatedAt = new Date().toISOString();
       await storage.saveUser(user);
@@ -748,13 +761,26 @@ export async function handleGetTotpRecoveryCode(request: Request, env: Env, user
   if (!valid) return errorResponse('Invalid password', 400);
 
   if (!user.totpRecoveryCode) {
-    user.totpRecoveryCode = createRecoveryCode();
+    // H4: First-time generation — create a new code, show plaintext to user once,
+    // store only the SHA-256 hash. The plaintext is never persisted.
+    const plainCode = createRecoveryCode();
+    user.totpRecoveryCode = await hashRecoveryCode(plainCode);
     user.updatedAt = new Date().toISOString();
     await storage.saveUser(user);
+    return jsonResponse({
+      code: plainCode,
+      object: 'twoFactorRecover',
+    });
   }
 
+  // H4: If a hash is already stored, the plaintext is unavailable server-side.
+  // Return an empty string — the client should prompt the user to regenerate
+  // their recovery code via the accounts.recover-2fa flow if they've lost it.
+  // (Legacy plaintext rows are still returned as-is for one final display before
+  //  the lazy-migration path upgrades them on next login.)
+  const isLegacyPlaintext = /^[A-Z2-7 ]+$/.test(user.totpRecoveryCode) && user.totpRecoveryCode.replace(/ /g, '').length === 32;
   return jsonResponse({
-    code: user.totpRecoveryCode,
+    code: isLegacyPlaintext ? user.totpRecoveryCode : '',
     object: 'twoFactorRecover',
   });
 }
@@ -812,7 +838,9 @@ export async function handleRecoverTwoFactor(request: Request, env: Env): Promis
     return errorResponse('Invalid credentials or recovery code', 400);
   }
 
-  if (!recoveryCodeEquals(recoveryCode, user.totpRecoveryCode)) {
+  // H4: recoveryCodeEquals is now async and returns { match, upgradedHash? }.
+  const rcVerify = await recoveryCodeEquals(recoveryCode, user.totpRecoveryCode);
+  if (!rcVerify.match) {
     await rateLimit.recordFailedLogin(recoverLimitKey);
     return errorResponse('Invalid credentials or recovery code', 400);
   }
@@ -820,7 +848,8 @@ export async function handleRecoverTwoFactor(request: Request, env: Env): Promis
   // Recovery code = destructive escape hatch: wipe ALL 2FA providers.
   user.totpSecret = null;
   user.totpEnabled = true; // reset to default; user will start fresh if they re-setup TOTP
-  user.totpRecoveryCode = createRecoveryCode();
+  // Rotate and immediately hash the new recovery code (one-time use).
+  user.totpRecoveryCode = await hashRecoveryCode(createRecoveryCode());
   user.securityStamp = generateUUID();
   user.updatedAt = new Date().toISOString();
   await storage.saveUser(user);
@@ -974,7 +1003,15 @@ export async function handleGetWebAuthnChallenge(request: Request, env: Env, use
   const user = await storage.getUserById(userId);
   if (!user) return errorResponse('User not found', 404);
 
-  // Master password is required for all 2FA management operations (checklist §5.3).
+  // Master password校验是可选的：仅当请求携带 masterPasswordHash 时才验证。
+  //
+  // 设计说明（BUG-BE-1 修复，Option A）：
+  //   - 强制校验已移至 handleRegisterWebAuthn（attestation POST）。
+  //   - GET challenge 本身无主密码也无害：没有 attestation 步骤就无法完成注册，
+  //     即使攻击者拿到 challenge，也无法在没有用户设备私钥的情况下伪造 attestation。
+  //   - HTTP GET 传 body 会被代理/CDN（如 Cloudflare）丢弃，不可靠；
+  //     前端 getWebAuthnChallenge() 发的是无 body 的 GET，不能要求必须有 masterPasswordHash。
+  //   - 若客户端自愿附带主密码（如某些第三方客户端），仍做验证以提供额外防御层。
   let body: Record<string, string | undefined> = {};
   try {
     const contentType = request.headers.get('content-type') || '';
@@ -984,9 +1021,10 @@ export async function handleGetWebAuthnChallenge(request: Request, env: Env, use
     } else if (request.method !== 'GET') {
       body = await request.json();
     }
-  } catch { /* ignored for GET */ }
+  } catch { /* ignored — body is optional for this endpoint */ }
 
   const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  // Optional: only verify if the client provided a master password hash.
   if (masterPasswordHash) {
     const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
     if (!valid) return errorResponse('Invalid password', 400);
@@ -1064,11 +1102,17 @@ export async function handleRegisterWebAuthn(request: Request, env: Env, userId:
     // Ensure the account has a recovery code now that WebAuthn is enabled.
     // The recovery code is account-level (not TOTP-specific): it acts as an
     // escape hatch to disable ALL 2FA providers at once (Bitwarden semantics).
+    // H4: Store hash only; the user retrieves plaintext via the recover endpoint.
     if (!user.totpRecoveryCode) {
-      user.totpRecoveryCode = createRecoveryCode();
+      user.totpRecoveryCode = await hashRecoveryCode(createRecoveryCode());
       user.updatedAt = new Date().toISOString();
       await storage.saveUser(user);
     }
+
+    // C1: Revoke existing sessions after adding a new 2FA provider so that stale
+    // sessions (which pre-date the new factor) cannot be used without re-authentication.
+    await storage.deleteRefreshTokensByUserId(userId);
+    AuthService.invalidateUserCache(userId);
 
     await safeWriteAuditEvent(env, {
       actorUserId: userId,
@@ -1303,8 +1347,15 @@ export async function handleSendEmailSetup(request: Request, env: Env, userId: s
 
   const storage = new StorageService(env.DB);
   const auth = new AuthService(env);
+  const rateLimit = new RateLimitService(env.DB);
   const user = await storage.getUserById(userId);
   if (!user) return errorResponse('User not found', 404);
+
+  // Per-user send budget: limit to 5 sends per 10 minutes.
+  const sendBudget = await rateLimit.consumeBudgetWithWindow(`${userId}:email-setup-send`, 5, 600);
+  if (!sendBudget.allowed) {
+    return errorResponse('Too many email verification requests. Please try again later.', 429);
+  }
 
   let body: Record<string, unknown>;
   try {
@@ -1445,11 +1496,17 @@ export async function handleEnableEmailTwoFactor(request: Request, env: Env, use
   });
 
   // Ensure account-level recovery code exists.
+  // H4: Store hash only; the user retrieves plaintext via the recover endpoint.
   if (!user.totpRecoveryCode) {
-    user.totpRecoveryCode = createRecoveryCode();
+    user.totpRecoveryCode = await hashRecoveryCode(createRecoveryCode());
     user.updatedAt = new Date().toISOString();
     await storage.saveUser(user);
   }
+
+  // C1: Revoke existing sessions after enabling a new 2FA provider so that stale
+  // sessions (which pre-date this factor) must re-authenticate with the new factor.
+  await storage.deleteRefreshTokensByUserId(userId);
+  AuthService.invalidateUserCache(userId);
 
   await safeWriteAuditEvent(env, {
     actorUserId: userId,

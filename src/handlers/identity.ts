@@ -6,7 +6,7 @@ import { jsonResponse, errorResponse, identityErrorResponse } from '../utils/res
 import { LIMITS } from '../config/limits';
 import { createRefreshToken } from '../utils/jwt';
 import { readAuthRequestDeviceInfo } from '../utils/device';
-import { createRecoveryCode, recoveryCodeEquals } from '../utils/recovery-code';
+import { createRecoveryCode, hashRecoveryCode, recoveryCodeEquals } from '../utils/recovery-code';
 import { generateUUID } from '../utils/uuid';
 import { issueSendAccessToken } from './sends';
 import {
@@ -344,10 +344,22 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
       if (!hasProvider || !hasToken) {
         const challengeCtx = { user, env, db: env.DB, twoFactorRows, request };
         const challengeData = new Map<number, unknown>();
+        // H2: per-provider try-catch — a failing provider (e.g. Email→Resend outage) must not
+        // block other providers. Only skip the failing provider; log server-side.
+        const availableForChallenge: TwoFactorProvider[] = [];
         for (const p of enabledProviders) {
-          challengeData.set(p.type, await p.buildChallenge(challengeCtx));
+          try {
+            challengeData.set(p.type, await p.buildChallenge(challengeCtx));
+            availableForChallenge.push(p);
+          } catch (err) {
+            console.error(`[2FA] buildChallenge failed for provider ${p.type}:`, err);
+            // Provider unavailable — omit from challenge list but continue for others.
+          }
         }
-        return twoFactorRequiredResponse(enabledProviders, challengeData, 'Two factor required.', canUseRecoveryCode);
+        // Fall back to full list for any provider whose challenge we could not build
+        // (they won't have data but the UI can still prompt for TOTP/WebAuthn).
+        const challengeProviders = availableForChallenge.length > 0 ? availableForChallenge : enabledProviders;
+        return twoFactorRequiredResponse(challengeProviders, challengeData, 'Two factor required.', canUseRecoveryCode);
       }
 
       let passedByRememberToken = false;
@@ -364,10 +376,18 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
         if (!passedByRememberToken) {
           const challengeCtx = { user, env, db: env.DB, twoFactorRows, request };
           const challengeData = new Map<number, unknown>();
+          // H2: per-provider try-catch — same resilience as the initial challenge flow.
+          const availableForChallenge: TwoFactorProvider[] = [];
           for (const p of enabledProviders) {
-            challengeData.set(p.type, await p.buildChallenge(challengeCtx));
+            try {
+              challengeData.set(p.type, await p.buildChallenge(challengeCtx));
+              availableForChallenge.push(p);
+            } catch (err) {
+              console.error(`[2FA] buildChallenge failed for provider ${p.type}:`, err);
+            }
           }
-          return twoFactorRequiredResponse(enabledProviders, challengeData, 'Two factor required.', canUseRecoveryCode);
+          const challengeProviders = availableForChallenge.length > 0 ? availableForChallenge : enabledProviders;
+          return twoFactorRequiredResponse(challengeProviders, challengeData, 'Two factor required.', canUseRecoveryCode);
         }
       } else if (
         normalizedTwoFactorProvider === TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE ||
@@ -377,13 +397,19 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
         // Recovery code is the account-level "escape hatch": it disables ALL 2FA
         // providers at once (TOTP + WebAuthn + Email + YubiKey), matching Bitwarden
         // semantics. The recovery code is then rotated so it can only be used once.
-        if (!recoveryCodeEquals(normalizedTwoFactorToken, user.totpRecoveryCode)) {
+        //
+        // H4: recoveryCodeEquals now compares against a SHA-256 hash (new format) or
+        // falls back to plaintext comparison for legacy rows, returning an upgradedHash
+        // to persist when the row was still plaintext (lazy migration).
+        const rcResult = await recoveryCodeEquals(normalizedTwoFactorToken, user.totpRecoveryCode);
+        if (!rcResult.match) {
           return recordFailedTwoFactorAndBuildResponse(rateLimit, loginIdentifier);
         }
         // Disable TOTP (legacy column).
         user.totpSecret = null;
-        // Rotate recovery code immediately (one-time use).
-        user.totpRecoveryCode = createRecoveryCode();
+        // Rotate recovery code immediately (one-time use). New code is hashed before
+        // storage via hashRecoveryCode inside saveUser path (set on user object).
+        user.totpRecoveryCode = await hashRecoveryCode(createRecoveryCode());
         user.updatedAt = new Date().toISOString();
         await storage.saveUser(user);
         // Disable all non-TOTP 2FA providers stored in two_factors table.
@@ -435,6 +461,11 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
 
     // Successful login - clear failed attempts
     await rateLimit.clearLoginAttempts(loginIdentifier);
+
+    // C4: Clean up any transient login-challenge rows (atype >= 1000, e.g. Email OTP).
+    // Prevents a previously-sent Email OTP code from being replayed through provider=1
+    // after the user authenticated successfully with a different factor (TOTP/WebAuthn).
+    await storage.deleteTransientTwoFactorsByUserId(user.id);
 
     const accessToken = await auth.generateAccessToken(user, deviceSession);
     const refreshToken = await auth.generateRefreshToken(user.id, deviceSession);
@@ -857,7 +888,10 @@ export async function handleSendEmailLogin(request: Request, env: Env): Promise<
   const rateLimit = new RateLimitService(env.DB);
   const clientId = getClientIdentifier(request);
 
-  // Rate limit check (reuse login bucket).
+  // Rate limit check. If a client IP is available use the per-IP login bucket;
+  // if no IP header is present, skip IP-based limiting only — we always fall back
+  // to per-account limiting below (after user is resolved) to prevent exploitation
+  // via clients that strip forwarding headers.
   if (clientId) {
     const rl = await rateLimit.checkLoginAttempt(clientId);
     if (!rl.allowed) {
@@ -900,6 +934,16 @@ export async function handleSendEmailLogin(request: Request, env: Env): Promise<
       await rateLimit.recordFailedLogin(clientId);
     }
     // Anti-enumeration: still 200 on bad password.
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  // Per-account send budget: limit to 5 sends per 10 minutes regardless of IP.
+  // This applies whether or not a client IP was available, closing the vector where
+  // an attacker strips forwarding headers to bypass IP-based limiting.
+  const accountSendKey = `${user.id}:email-otp-send`;
+  const accountBudget = await rateLimit.consumeBudgetWithWindow(accountSendKey, 5, 600);
+  if (!accountBudget.allowed) {
+    // Anti-enumeration: 200 on rate limit too.
     return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
 

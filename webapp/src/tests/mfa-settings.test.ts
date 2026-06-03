@@ -91,18 +91,18 @@ describe('关闭最后一个 MFA 方式时的确认逻辑', () => {
   it('count=1 时：调 onShowConfirm，不直接执行 action', () => {
     let actionCalled = false;
     let confirmCalled = false;
-    let capturedAction: (() => void) | null = null;
+    const captured: { action: (() => void) | null } = { action: null };
 
     withLastMethodCheck(
       1,
       () => { actionCalled = true; },
-      (pending) => { confirmCalled = true; capturedAction = pending; },
+      (pending) => { confirmCalled = true; captured.action = pending; },
     );
 
     expect(actionCalled).toBe(false);
     expect(confirmCalled).toBe(true);
     // 用户点击"确认"后才执行 action
-    capturedAction?.();
+    captured.action?.();
     expect(actionCalled).toBe(true);
   });
 

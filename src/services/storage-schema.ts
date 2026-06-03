@@ -133,6 +133,12 @@ const SCHEMA_STATEMENTS: readonly string[] = [
   // Migration 0003: reversible TOTP disable — preserve totp_secret, just flip this flag.
   // DEFAULT 1 means all existing users with a totp_secret remain active after upgrade.
   'ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 1',
+
+  // Migration 0004: TOTP replay protection — last-used counter tracking.
+  // NULL = no authenticated TOTP login yet (all counters accepted on first use).
+  // On each successful TOTP login the matched counter value is written here; subsequent
+  // attempts with counter ≤ stored value are rejected (~90-second replay window closed).
+  'ALTER TABLE users ADD COLUMN totp_last_counter INTEGER',
 ];
 
 async function executeSchemaStatement(db: D1Database, statement: string): Promise<void> {

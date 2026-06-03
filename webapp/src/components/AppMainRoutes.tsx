@@ -137,6 +137,10 @@ export interface AppMainRoutesProps {
   emailTwoFactorAvailable?: boolean;
   onDisableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
   onReEnableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
+  onSendEmailSetupCode?: (email: string, masterPassword: string) => Promise<void>;
+  onEnableEmailTwoFactor?: (email: string, masterPassword: string, token: string) => Promise<void>;
+  emailTwoFactorQueryError?: boolean;
+  webAuthnKeysQueryError?: boolean;
   totpConfigured?: boolean;
   onReEnableTotp?: (masterPassword: string) => Promise<void>;
   onCreateInvite: (hours: number) => Promise<void>;
@@ -293,6 +297,10 @@ export default function AppMainRoutes(props: AppMainRoutesProps) {
                 emailTwoFactorAvailable={props.emailTwoFactorAvailable}
                 onDisableEmailTwoFactor={props.onDisableEmailTwoFactor}
                 onReEnableEmailTwoFactor={props.onReEnableEmailTwoFactor}
+                onSendEmailSetupCode={props.onSendEmailSetupCode}
+                onEnableEmailTwoFactor={props.onEnableEmailTwoFactor}
+                emailTwoFactorQueryError={props.emailTwoFactorQueryError}
+                webAuthnKeysQueryError={props.webAuthnKeysQueryError}
                 totpConfigured={props.totpConfigured}
                 onReEnableTotp={props.onReEnableTotp}
               />

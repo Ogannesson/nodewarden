@@ -679,7 +679,7 @@ export async function reEnableEmailTwoFactor(
   });
   if (!resp.ok) {
     const errBody = await parseJson<TokenError>(resp);
-    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_email_mfa_reenable_failed')));
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_reenable_email_mfa_failed')));
   }
 }
 
@@ -1078,13 +1078,78 @@ export async function performWebAuthnAssertion(
 /**
  * GET /api/two-factor/email
  * Returns whether email 2FA is enabled for the current user.
+ * Throws on non-2xx (caller must handle errors explicitly).
  */
 export async function getEmailTwoFactorStatus(authedFetch: AuthedFetch): Promise<{ enabled: boolean; available: boolean; configured: boolean }> {
   const resp = await authedFetch('/api/two-factor/email', { method: 'GET' });
-  if (!resp.ok) return { enabled: false, available: false, configured: false };
+  if (!resp.ok) {
+    const body = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(body?.error_description || body?.error, t('txt_email_mfa_load_failed')));
+  }
   const result = (await parseJson<{ enabled?: boolean; available?: boolean; configured?: boolean }>(resp)) || {};
   // available is explicitly returned by the server (true only when RESEND_API_KEY + MFA_EMAIL_FROM are set)
   return { enabled: !!result.enabled, available: !!result.available, configured: !!result.configured };
+}
+
+/**
+ * POST /api/two-factor/send-email-login
+ * Triggers the server to send a one-time email OTP code to the registered address.
+ * Used during login when Email is the selected 2FA provider (provider=1).
+ */
+export async function sendEmailLoginCode(email: string, passwordHash: string): Promise<void> {
+  const body = new URLSearchParams();
+  body.set('email', email.toLowerCase());
+  body.set('masterPasswordHash', passwordHash);
+  const resp = await fetch('/api/two-factor/send-email-login', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      [WEB_SESSION_HEADER]: '1',
+    },
+    body: body.toString(),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_email_otp_send_failed')));
+  }
+}
+
+/**
+ * Submit an email OTP code during login (twoFactorProvider=1).
+ */
+export async function loginWithEmailCode(
+  email: string,
+  passwordHash: string,
+  emailCode: string,
+  rememberDevice: boolean
+): Promise<TokenSuccess | TokenError> {
+  const body = new URLSearchParams();
+  body.set('grant_type', 'password');
+  body.set('username', email.toLowerCase());
+  body.set('password', passwordHash);
+  body.set('scope', 'api offline_access');
+  body.set('deviceIdentifier', getOrCreateDeviceIdentifier());
+  body.set('deviceName', guessDeviceName());
+  body.set('deviceType', '14');
+  body.set('twoFactorProvider', '1');
+  body.set('twoFactorToken', emailCode.trim());
+  if (rememberDevice) {
+    body.set('twoFactorRemember', '1');
+  }
+  const resp = await fetch('/identity/connect/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      [WEB_SESSION_HEADER]: '1',
+    },
+    body: body.toString(),
+  });
+  const json = (await parseJson<TokenSuccess & TokenError>(resp)) || {};
+  if (resp.ok) {
+    saveRememberTwoFactorToken((json as TokenSuccess).TwoFactorToken);
+  }
+  if (!resp.ok) return json;
+  return json;
 }
 
 /**
@@ -1103,5 +1168,49 @@ export async function disableEmailTwoFactor(
   if (!resp.ok) {
     const errBody = await parseJson<TokenError>(resp);
     throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_email_mfa_disable_failed')));
+  }
+}
+
+/**
+ * POST /api/two-factor/send-email
+ * Trigger a setup verification code for the *authenticated* user.
+ * Used when enrolling Email 2FA from Settings (not from the login screen).
+ * Requires masterPasswordHash + target email to validate intent.
+ */
+export async function sendEmailSetupCode(
+  authedFetch: AuthedFetch,
+  email: string,
+  masterPasswordHash: string
+): Promise<void> {
+  const resp = await authedFetch('/api/two-factor/send-email', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_email_mfa_setup_send_failed')));
+  }
+}
+
+/**
+ * PUT /api/two-factor/email
+ * Complete Email 2FA enrollment by submitting the verification code.
+ * Requires masterPasswordHash, email, and the OTP token.
+ */
+export async function enableEmailTwoFactor(
+  authedFetch: AuthedFetch,
+  email: string,
+  masterPasswordHash: string,
+  token: string
+): Promise<void> {
+  const resp = await authedFetch('/api/two-factor/email', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, masterPasswordHash, token }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_email_mfa_setup_verify_failed')));
   }
 }

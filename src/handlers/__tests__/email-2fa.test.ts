@@ -66,11 +66,13 @@ vi.mock('../../services/auth', () => ({
 
 const mockCheckLoginAttempt = vi.fn(() => Promise.resolve({ allowed: true }));
 const mockRecordFailedLogin = vi.fn(() => Promise.resolve({ locked: false }));
+const mockConsumeBudgetWithWindow = vi.fn(() => Promise.resolve({ allowed: true, remaining: 4 }));
 vi.mock('../../services/ratelimit', () => ({
   RateLimitService: function () {
     return {
       checkLoginAttempt: mockCheckLoginAttempt,
       recordFailedLogin: mockRecordFailedLogin,
+      consumeBudgetWithWindow: mockConsumeBudgetWithWindow,
     };
   },
   getClientIdentifier: vi.fn(() => '127.0.0.1'),
@@ -128,6 +130,7 @@ function makeUser(overrides: Partial<User> = {}): User {
     totpSecret: null,
     totpEnabled: true,
     totpRecoveryCode: null,
+    totpLastCounter: null,
     apiKey: null,
     createdAt: '2023-01-01T00:00:00Z',
     updatedAt: '2023-01-01T00:00:00Z',

@@ -58,6 +58,12 @@ export interface User {
   /** Whether TOTP is actively enabled (separate from having a secret — allows reversible disable). */
   totpEnabled: boolean;
   totpRecoveryCode: string | null;
+  /**
+   * Replay protection: the counter value (floor(nowMs/30000) + delta) of the last
+   * successfully verified TOTP code. A submitted code whose counter is ≤ this value
+   * is rejected. NULL means no TOTP login has been recorded yet.
+   */
+  totpLastCounter: number | null;
   apiKey: string | null;
   createdAt: string;
   updatedAt: string;

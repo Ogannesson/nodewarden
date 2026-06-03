@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createRecoveryCode, recoveryCodeEquals } from '../recovery-code';
+import { createRecoveryCode, hashRecoveryCode, recoveryCodeEquals } from '../recovery-code';
 
 describe('createRecoveryCode', () => {
   it('生成的恢复码包含 8 段，每段4字符，空格分隔', () => {
@@ -29,63 +29,127 @@ describe('createRecoveryCode', () => {
   });
 });
 
-describe('recoveryCodeEquals', () => {
-  it('相同恢复码（格式一致）返回 true', () => {
+describe('hashRecoveryCode', () => {
+  it('同一明文码哈希值相同（确定性）', async () => {
     const code = createRecoveryCode();
-    expect(recoveryCodeEquals(code, code)).toBe(true);
+    const h1 = await hashRecoveryCode(code);
+    const h2 = await hashRecoveryCode(code);
+    expect(h1).toBe(h2);
   });
 
-  it('输入带空格、stored 不带空格：normalize 后相等返回 true', () => {
+  it('返回 64 字符小写十六进制（SHA-256）', async () => {
+    const hash = await hashRecoveryCode(createRecoveryCode());
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('带空格和不带空格的同一码哈希相同（normalise 后计算）', async () => {
     const code = createRecoveryCode();
     const compact = code.replace(/ /g, '');
-    expect(recoveryCodeEquals(code, compact)).toBe(true);
+    expect(await hashRecoveryCode(code)).toBe(await hashRecoveryCode(compact));
   });
 
-  it('输入不带空格、stored 带空格：normalize 后相等返回 true', () => {
+  it('不同码产生不同哈希', async () => {
+    const h1 = await hashRecoveryCode(createRecoveryCode());
+    const h2 = await hashRecoveryCode(createRecoveryCode());
+    expect(h1).not.toBe(h2);
+  });
+});
+
+describe('recoveryCodeEquals – 新哈希格式（stored = 64-char hex）', () => {
+  it('H4: 正确码与存储哈希匹配，返回 match:true, 无 upgradedHash', async () => {
     const code = createRecoveryCode();
-    const compact = code.replace(/ /g, '');
-    expect(recoveryCodeEquals(compact, code)).toBe(true);
+    const stored = await hashRecoveryCode(code);
+    const result = await recoveryCodeEquals(code, stored);
+    expect(result.match).toBe(true);
+    expect(result.upgradedHash).toBeUndefined();
   });
 
-  it('小写输入应被接受（normalize 转大写）', () => {
-    const code = createRecoveryCode();
-    expect(recoveryCodeEquals(code.toLowerCase(), code)).toBe(true);
-  });
-
-  it('错误恢复码返回 false', () => {
+  it('H4: 错误码与存储哈希不匹配，返回 match:false', async () => {
     const code1 = createRecoveryCode();
     const code2 = createRecoveryCode();
-    // 极低概率两码相同，但实践中不会发生
-    if (code1 !== code2) {
-      expect(recoveryCodeEquals(code1, code2)).toBe(false);
-    }
+    const stored = await hashRecoveryCode(code1);
+    const result = await recoveryCodeEquals(code2, stored);
+    expect(result.match).toBe(false);
   });
 
-  it('stored 为 null 返回 false', () => {
-    expect(recoveryCodeEquals('ABCD EFGH IJKL MNOP QRST UVWX YZ23 4567', null)).toBe(false);
-  });
-
-  it('stored 为 undefined 返回 false', () => {
-    expect(recoveryCodeEquals('ABCD EFGH IJKL MNOP QRST UVWX YZ23 4567', undefined)).toBe(false);
-  });
-
-  it('空字符串 vs 空字符串：normalize 后均空，长度不等（0 vs storedNormalized 长度）应返回 false', () => {
-    // 空输入 normalize 后长度 0，与任何真正的恢复码长度不同
+  it('H4: 忽略空格差异（normalise 后哈希一致）', async () => {
     const code = createRecoveryCode();
-    expect(recoveryCodeEquals('', code)).toBe(false);
+    const compact = code.replace(/ /g, '');
+    const stored = await hashRecoveryCode(code);
+    const result = await recoveryCodeEquals(compact, stored);
+    expect(result.match).toBe(true);
   });
 
-  it('常量时间比较不短路：对每对输入行为一致（通过输出验证，不是时序）', () => {
+  it('H4: 小写输入被接受（normalise 转大写后哈希一致）', async () => {
     const code = createRecoveryCode();
-    // 修改第一个字符来产生不同的码
+    const stored = await hashRecoveryCode(code);
+    const result = await recoveryCodeEquals(code.toLowerCase(), stored);
+    expect(result.match).toBe(true);
+  });
+});
+
+describe('recoveryCodeEquals – 惰性迁移（stored = 旧明文格式）', () => {
+  it('H4: 旧明文码匹配时返回 match:true + upgradedHash（升级指令）', async () => {
+    const code = createRecoveryCode(); // 旧明文存储格式
+    const result = await recoveryCodeEquals(code, code);
+    expect(result.match).toBe(true);
+    expect(result.upgradedHash).toBeDefined();
+    expect(result.upgradedHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('H4: 升级哈希与直接哈希同一明文的结果一致', async () => {
+    const code = createRecoveryCode();
+    const result = await recoveryCodeEquals(code, code);
+    const expectedHash = await hashRecoveryCode(code);
+    expect(result.upgradedHash).toBe(expectedHash);
+  });
+
+  it('H4: 旧明文码不匹配时返回 match:false', async () => {
+    const code1 = createRecoveryCode();
+    const code2 = createRecoveryCode();
+    const result = await recoveryCodeEquals(code1, code2);
+    expect(result.match).toBe(false);
+    expect(result.upgradedHash).toBeUndefined();
+  });
+
+  it('H4: 带空格的旧明文和不带空格的输入可以匹配', async () => {
+    const code = createRecoveryCode();
+    const compact = code.replace(/ /g, '');
+    const result = await recoveryCodeEquals(compact, code);
+    expect(result.match).toBe(true);
+    expect(result.upgradedHash).toBeDefined();
+  });
+});
+
+describe('recoveryCodeEquals – null/undefined/空值', () => {
+  it('stored 为 null 返回 match:false', async () => {
+    const result = await recoveryCodeEquals('ABCD EFGH IJKL MNOP QRST UVWX YZ23 4567', null);
+    expect(result.match).toBe(false);
+  });
+
+  it('stored 为 undefined 返回 match:false', async () => {
+    const result = await recoveryCodeEquals('ABCD EFGH IJKL MNOP QRST UVWX YZ23 4567', undefined);
+    expect(result.match).toBe(false);
+  });
+
+  it('空字符串输入返回 match:false', async () => {
+    const code = createRecoveryCode();
+    const stored = await hashRecoveryCode(code);
+    const result = await recoveryCodeEquals('', stored);
+    expect(result.match).toBe(false);
+  });
+
+  it('常量时间特性：修改一位输入应返回 match:false', async () => {
+    const code = createRecoveryCode();
+    const stored = await hashRecoveryCode(code);
     const parts = code.split(' ');
-    const firstChar = parts[0][0];
-    // 把第一个字符换成不同字符（循环到下一个 base32 字符）
     const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    const firstChar = parts[0][0];
     const idx = alphabet.indexOf(firstChar);
     const differentChar = alphabet[(idx + 1) % alphabet.length];
     parts[0] = differentChar + parts[0].slice(1);
     const modifiedCode = parts.join(' ');
-    expect(recoveryCodeEquals(modifiedCode, code)).toBe(false);
+    const result = await recoveryCodeEquals(modifiedCode, stored);
+    expect(result.match).toBe(false);
   });
 });

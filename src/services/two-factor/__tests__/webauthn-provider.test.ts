@@ -185,6 +185,7 @@ function makeUser(id: string = 'user-001'): User {
     totpSecret: null,
     totpEnabled: true,
     totpRecoveryCode: null,
+    totpLastCounter: null,
     apiKey: null,
     createdAt: '2023-01-01T00:00:00Z',
     updatedAt: '2023-01-01T00:00:00Z',

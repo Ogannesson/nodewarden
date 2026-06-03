@@ -42,6 +42,7 @@ vi.mock('../../services/audit-events', () => ({
 const mockGetUser = vi.fn<() => Promise<User | null>>();
 const mockGetTwoFactorsByUserId = vi.fn(() => Promise.resolve([]));
 const mockSaveUser = vi.fn(() => Promise.resolve());
+const mockDeleteRefreshTokensByUserId = vi.fn(() => Promise.resolve());
 
 vi.mock('../../services/storage', () => ({
   StorageService: function () {
@@ -49,15 +50,19 @@ vi.mock('../../services/storage', () => ({
       getUserById: mockGetUser,
       getTwoFactorsByUserId: mockGetTwoFactorsByUserId,
       saveUser: mockSaveUser,
+      deleteRefreshTokensByUserId: mockDeleteRefreshTokensByUserId,
     };
   },
 }));
 
 const mockAuthVerify = vi.fn<() => Promise<boolean>>(() => Promise.resolve(true));
+// C1: vi.hoisted allows the mock factory to close over a variable available at hoist time.
+const mockInvalidateUserCache = vi.fn();
 vi.mock('../../services/auth', () => ({
-  AuthService: function () {
-    return { verifyPassword: mockAuthVerify };
-  },
+  AuthService: Object.assign(
+    function() { return { verifyPassword: (...args: Parameters<typeof mockAuthVerify>) => mockAuthVerify(...args) }; },
+    { invalidateUserCache: (...args: unknown[]) => mockInvalidateUserCache(...args) }
+  ),
 }));
 
 vi.mock('../../services/two-factor/email-provider', () => ({
@@ -116,6 +121,7 @@ function makeUser(id = 'user-001'): User {
     totpSecret: null,
     totpEnabled: true,
     totpRecoveryCode: null,
+    totpLastCounter: null,
     apiKey: null,
     createdAt: '2023-01-01T00:00:00Z',
     updatedAt: '2023-01-01T00:00:00Z',
