@@ -1770,3 +1770,62 @@
     padding-top: 0;
   }
 }
+
+/* ── WebAuthn key list ── */
+
+.webauthn-keys-list {
+  @apply grid gap-2 mb-3;
+}
+
+.webauthn-key-row {
+  @apply flex items-center justify-between gap-3 rounded-xl px-3 py-2.5;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.webauthn-key-info {
+  @apply flex min-w-0 items-center gap-2;
+}
+
+.webauthn-key-icon {
+  @apply shrink-0;
+  color: var(--primary);
+}
+
+.webauthn-key-name {
+  @apply min-w-0 truncate text-sm font-bold;
+  color: var(--text);
+}
+
+.webauthn-key-date {
+  @apply shrink-0 text-xs;
+  color: var(--muted);
+}
+
+/* ── WebAuthn add-key section ── */
+
+.webauthn-add-section {
+  @apply flex flex-wrap items-end gap-3;
+}
+
+.webauthn-add-section .field {
+  @apply mb-0 min-w-0 flex-1;
+}
+
+@media (max-width: 560px) {
+  .webauthn-key-row {
+    @apply flex-wrap gap-2;
+  }
+
+  .webauthn-key-date {
+    @apply hidden;
+  }
+
+  .webauthn-add-section {
+    @apply flex-col items-stretch;
+  }
+
+  .webauthn-add-section .field {
+    @apply flex-none;
+  }
+}

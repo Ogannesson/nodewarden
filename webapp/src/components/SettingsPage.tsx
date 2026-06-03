@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
-import { Clipboard, KeyRound, RefreshCw, ShieldCheck, ShieldOff, Trash2, UsbIcon } from 'lucide-preact';
+import { Clipboard, KeyRound, RefreshCw, ShieldCheck, ShieldOff, Trash2 } from 'lucide-preact';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import qrcode from 'qrcode-generator';
 import type { Profile } from '@/lib/types';
@@ -431,7 +431,7 @@ export default function SettingsPage(props: SettingsPageProps) {
                 {(props.webAuthnKeys ?? []).map((key) => (
                   <div key={key.id} className="webauthn-key-row">
                     <div className="webauthn-key-info">
-                      <UsbIcon size={14} className="webauthn-key-icon" aria-hidden="true" />
+                      <KeyRound size={16} className="webauthn-key-icon" aria-hidden="true" />
                       <span className="webauthn-key-name">{key.name}</span>
                       <span className="webauthn-key-date muted-inline">
                         {t('txt_webauthn_created_at', { date: formatDateTime(key.createdAt) })}
