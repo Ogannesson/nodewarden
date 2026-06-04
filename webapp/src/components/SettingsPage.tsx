@@ -541,6 +541,9 @@ export default function SettingsPage(props: SettingsPageProps) {
       {/* 2FA cards grid — align-items:start so cards don't stretch to each other's height */}
       <div className="mfa-cards-grid">
 
+      {/* Left column: TOTP + Email */}
+      <div className="mfa-col">
+
       {/* TOTP section */}
       <section className="card settings-module">
         <div className="settings-module-head">
@@ -625,156 +628,6 @@ export default function SettingsPage(props: SettingsPageProps) {
               </div>
             </div>
           </div>
-        )}
-      </section>
-
-      {/* Security Keys (WebAuthn) section */}
-      <section className="card settings-module">
-        <div className="settings-module-head">
-          <h3>{t('txt_webauthn')}</h3>
-          {props.webAuthnKeysQueryError && (
-            <span className="mfa-query-error" title={t('txt_webauthn_load_failed')}>
-              ⚠
-            </span>
-          )}
-          <button
-            type="button"
-            role="switch"
-            aria-checked={webAuthnActivelyEnabled}
-            disabled={!!props.webAuthnKeysQueryError}
-            className={webAuthnActivelyEnabled ? 'mfa-toggle mfa-toggle--on' : 'mfa-toggle'}
-            onClick={() => {
-              if (webAuthnActivelyEnabled) {
-                // Turn off: show disable-all dialog (gated by last-method check)
-                withLastMethodCheck(() => setDisableWebAuthnDialogOpen(true));
-              } else if ((props.webAuthnKeys ?? []).length > 0 && props.onReEnableWebAuthn) {
-                // Credentials exist but disabled → re-enable (no re-registration needed)
-                setReEnableWebAuthnDialogOpen(true);
-                setReEnableWebAuthnPassword('');
-              }
-              // No credentials at all: add-key form below is visible
-            }}
-            aria-label={webAuthnActivelyEnabled ? t('txt_webauthn_disable_all_title') : ((props.webAuthnKeys ?? []).length > 0 ? t('txt_reenable_webauthn') : t('txt_webauthn_add_key'))}
-          >
-            <span className="mfa-toggle-thumb" />
-          </button>
-        </div>
-
-        {!webAuthnSupported && (
-          <p className="muted-inline settings-field-note">{t('txt_webauthn_not_supported')}</p>
-        )}
-
-        {webAuthnSupported && (
-          <>
-            {(props.webAuthnKeys ?? []).length > 0 && (
-              <div className="webauthn-keys-list">
-                <div className="field-label">{t('txt_webauthn_keys')}</div>
-                {(props.webAuthnKeys ?? []).map((key) => {
-                  const { labelKey, Icon: TypeIcon } = getKeyType(key);
-                  const isRenaming = webAuthnRenamingId === key.id;
-                  return (
-                    <div key={key.id} className="webauthn-key-row">
-                      <div className="webauthn-key-info">
-                        <TypeIcon size={16} className="webauthn-key-icon" aria-hidden="true" />
-                        {isRenaming ? (
-                          <input
-                            className="input webauthn-rename-input"
-                            value={webAuthnRenameValue}
-                            placeholder={t('txt_webauthn_rename_placeholder')}
-                            aria-label={t('txt_webauthn_rename_placeholder')}
-                            maxLength={64}
-                            onInput={(e) => setWebAuthnRenameValue((e.currentTarget as HTMLInputElement).value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') void submitRename();
-                              if (e.key === 'Escape') setWebAuthnRenamingId(null);
-                            }}
-                            autoFocus
-                          />
-                        ) : (
-                          <>
-                            <span className="webauthn-key-name">{key.name}</span>
-                            <span className="webauthn-key-type-badge">{t(labelKey)}</span>
-                          </>
-                        )}
-                        <span className="webauthn-key-date muted-inline">
-                          {t('txt_webauthn_created_at', { date: formatDateTime(key.createdAt) })}
-                        </span>
-                      </div>
-                      <div className="webauthn-key-actions">
-                        {isRenaming ? (
-                          <>
-                            <button
-                              type="button"
-                              className="btn btn-primary small"
-                              disabled={webAuthnRenaming || !webAuthnRenameValue.trim()}
-                              onClick={() => void submitRename()}
-                            >
-                              {t('txt_webauthn_rename_save')}
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-secondary small"
-                              onClick={() => setWebAuthnRenamingId(null)}
-                            >
-                              {t('txt_webauthn_rename_cancel')}
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              className="btn btn-secondary small"
-                              onClick={() => {
-                                setWebAuthnRenamingId(key.id);
-                                setWebAuthnRenameValue(key.name);
-                              }}
-                            >
-                              <Pencil size={12} className="btn-icon" />
-                              {t('txt_webauthn_rename')}
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-danger small"
-                              onClick={() => openWebAuthnMasterPasswordPrompt('delete', key.id, key.name)}
-                            >
-                              <Trash2 size={12} className="btn-icon" />
-                              {t('txt_webauthn_delete_key')}
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {(props.webAuthnKeys ?? []).length === 0 && !props.webAuthnKeysLoading && (
-              <p className="muted-inline settings-field-note">{t('txt_webauthn_no_keys')}</p>
-            )}
-
-            <div className="webauthn-add-section">
-              <label className="field">
-                <span>{t('txt_webauthn_key_name')}</span>
-                <input
-                  className="input"
-                  value={webAuthnKeyName}
-                  placeholder={t('txt_webauthn_key_name_placeholder')}
-                  onInput={(e) => setWebAuthnKeyName((e.currentTarget as HTMLInputElement).value)}
-                  disabled={webAuthnRegistering}
-                />
-              </label>
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={webAuthnRegistering || !props.onRegisterWebAuthnKey}
-                onClick={() => openWebAuthnMasterPasswordPrompt('register')}
-              >
-                <ShieldCheck size={14} className="btn-icon" />
-                {webAuthnRegistering ? t('txt_webauthn_registering') : t('txt_webauthn_add_key')}
-              </button>
-            </div>
-          </>
         )}
       </section>
 
@@ -967,6 +820,163 @@ export default function SettingsPage(props: SettingsPageProps) {
           )}
         </section>
       )}
+
+      </div>{/* end mfa-col left */}
+
+      {/* Right column: Security Keys (WebAuthn) */}
+      <div className="mfa-col">
+
+      {/* Security Keys (WebAuthn) section */}
+      <section className="card settings-module">
+        <div className="settings-module-head">
+          <h3>{t('txt_webauthn')}</h3>
+          {props.webAuthnKeysQueryError && (
+            <span className="mfa-query-error" title={t('txt_webauthn_load_failed')}>
+              ⚠
+            </span>
+          )}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={webAuthnActivelyEnabled}
+            disabled={!!props.webAuthnKeysQueryError}
+            className={webAuthnActivelyEnabled ? 'mfa-toggle mfa-toggle--on' : 'mfa-toggle'}
+            onClick={() => {
+              if (webAuthnActivelyEnabled) {
+                // Turn off: show disable-all dialog (gated by last-method check)
+                withLastMethodCheck(() => setDisableWebAuthnDialogOpen(true));
+              } else if ((props.webAuthnKeys ?? []).length > 0 && props.onReEnableWebAuthn) {
+                // Credentials exist but disabled → re-enable (no re-registration needed)
+                setReEnableWebAuthnDialogOpen(true);
+                setReEnableWebAuthnPassword('');
+              }
+              // No credentials at all: add-key form below is visible
+            }}
+            aria-label={webAuthnActivelyEnabled ? t('txt_webauthn_disable_all_title') : ((props.webAuthnKeys ?? []).length > 0 ? t('txt_reenable_webauthn') : t('txt_webauthn_add_key'))}
+          >
+            <span className="mfa-toggle-thumb" />
+          </button>
+        </div>
+
+        {!webAuthnSupported && (
+          <p className="muted-inline settings-field-note">{t('txt_webauthn_not_supported')}</p>
+        )}
+
+        {webAuthnSupported && (
+          <>
+            {(props.webAuthnKeys ?? []).length > 0 && (
+              <div className="webauthn-keys-list">
+                <div className="field-label">{t('txt_webauthn_keys')}</div>
+                {(props.webAuthnKeys ?? []).map((key) => {
+                  const { labelKey, Icon: TypeIcon } = getKeyType(key);
+                  const isRenaming = webAuthnRenamingId === key.id;
+                  return (
+                    <div key={key.id} className="webauthn-key-row">
+                      <div className="webauthn-key-info">
+                        <TypeIcon size={16} className="webauthn-key-icon" aria-hidden="true" />
+                        {isRenaming ? (
+                          <input
+                            className="input webauthn-rename-input"
+                            value={webAuthnRenameValue}
+                            placeholder={t('txt_webauthn_rename_placeholder')}
+                            aria-label={t('txt_webauthn_rename_placeholder')}
+                            maxLength={64}
+                            onInput={(e) => setWebAuthnRenameValue((e.currentTarget as HTMLInputElement).value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void submitRename();
+                              if (e.key === 'Escape') setWebAuthnRenamingId(null);
+                            }}
+                            autoFocus
+                          />
+                        ) : (
+                          <>
+                            <span className="webauthn-key-name">{key.name}</span>
+                            <span className="webauthn-key-type-badge">{t(labelKey)}</span>
+                          </>
+                        )}
+                        <span className="webauthn-key-date muted-inline">
+                          {t('txt_webauthn_created_at', { date: formatDateTime(key.createdAt) })}
+                        </span>
+                      </div>
+                      <div className="webauthn-key-actions">
+                        {isRenaming ? (
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-primary small"
+                              disabled={webAuthnRenaming || !webAuthnRenameValue.trim()}
+                              onClick={() => void submitRename()}
+                            >
+                              {t('txt_webauthn_rename_save')}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-secondary small"
+                              onClick={() => setWebAuthnRenamingId(null)}
+                            >
+                              {t('txt_webauthn_rename_cancel')}
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-secondary small"
+                              onClick={() => {
+                                setWebAuthnRenamingId(key.id);
+                                setWebAuthnRenameValue(key.name);
+                              }}
+                            >
+                              <Pencil size={12} className="btn-icon" />
+                              {t('txt_webauthn_rename')}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-danger small"
+                              onClick={() => openWebAuthnMasterPasswordPrompt('delete', key.id, key.name)}
+                            >
+                              <Trash2 size={12} className="btn-icon" />
+                              {t('txt_webauthn_delete_key')}
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {(props.webAuthnKeys ?? []).length === 0 && !props.webAuthnKeysLoading && (
+              <p className="muted-inline settings-field-note">{t('txt_webauthn_no_keys')}</p>
+            )}
+
+            <div className="webauthn-add-section">
+              <label className="field">
+                <span>{t('txt_webauthn_key_name')}</span>
+                <input
+                  className="input"
+                  value={webAuthnKeyName}
+                  placeholder={t('txt_webauthn_key_name_placeholder')}
+                  onInput={(e) => setWebAuthnKeyName((e.currentTarget as HTMLInputElement).value)}
+                  disabled={webAuthnRegistering}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={webAuthnRegistering || !props.onRegisterWebAuthnKey}
+                onClick={() => openWebAuthnMasterPasswordPrompt('register')}
+              >
+                <ShieldCheck size={14} className="btn-icon" />
+                {webAuthnRegistering ? t('txt_webauthn_registering') : t('txt_webauthn_add_key')}
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+
+      </div>{/* end mfa-col right */}
 
       </div>{/* end mfa-cards-grid */}
 

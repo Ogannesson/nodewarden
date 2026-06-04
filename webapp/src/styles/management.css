@@ -1939,6 +1939,13 @@
   grid-column: 1 / -1;
 }
 
+.mfa-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
 /* ── MFA method enabled note — disabled modifier ── */
 
 .mfa-method-enabled-note--disabled {
