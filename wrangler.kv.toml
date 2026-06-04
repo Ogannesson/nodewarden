@@ -22,6 +22,14 @@ database_name = "nodewarden-db"
 name = "NOTIFICATIONS_HUB"
 class_name = "NotificationsHub"
 
+# Cloudflare Email Sending (Email 2FA default channel).
+# Requires Workers Paid plan + verified sending domain on the account.
+# Set MFA_EMAIL_FROM to the verified sender address in .dev.vars / Worker secrets.
+# remote=true lets wrangler dev use the real Cloudflare Email Sending service.
+[[send_email]]
+name = "EMAIL"
+remote = true
+
 [[kv_namespaces]]
 binding = "ATTACHMENTS_KV"
 

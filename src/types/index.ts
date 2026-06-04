@@ -1,3 +1,12 @@
+/**
+ * Minimal local type for Cloudflare Email Sending binding (env.EMAIL).
+ * Matches the Cloudflare Workers Email Sending API (send_email binding).
+ * Requires Workers Paid plan + verified sending domain.
+ */
+export interface CfEmailBinding {
+  send(msg: { from: string; to: string; subject: string; text: string; html?: string }): Promise<{ messageId?: string }>;
+}
+
 // Environment bindings
 export interface Env {
   DB: D1Database;
@@ -10,13 +19,23 @@ export interface Env {
   // Optional fallback for attachment/send file storage (no credit card required).
   ATTACHMENTS_KV?: KVNamespace;
   JWT_SECRET: string;
-  // Email 2FA (P2). Both must be set to enable Email 2FA provider.
-  // If either is absent, isAvailable() returns false and the provider is silently omitted.
-  RESEND_API_KEY?: string;
+  // Email 2FA (P2). At minimum MFA_EMAIL_FROM plus one sending backend must be set.
+  // If absent, isEmailSenderConfigured() returns false and Email 2FA is silently omitted.
   MFA_EMAIL_FROM?: string;
-  // Optional: override Resend API endpoint for local/CI testing.
-  // Example: RESEND_BASE_URL=http://localhost:9876/emails
-  RESEND_BASE_URL?: string;
+  // Cloudflare Email Sending binding (default backend). Declared via [[send_email]] in wrangler.toml.
+  EMAIL?: CfEmailBinding;
+  // Generic HTTP email backend selection: 'cloudflare' | 'http' | 'auto' (default).
+  MFA_EMAIL_PROVIDER?: string;
+  // Generic HTTP endpoint for transactional email (any flat-JSON API).
+  MFA_EMAIL_HTTP_ENDPOINT?: string;
+  // Authorization header value for the HTTP endpoint (e.g. "Bearer <token>").
+  MFA_EMAIL_HTTP_AUTH?: string;
+  // Extra headers as JSON object string (merged with Authorization if set).
+  MFA_EMAIL_HTTP_HEADERS?: string;
+  // Extra body fields as JSON object string (added to every send request).
+  MFA_EMAIL_HTTP_BODY?: string;
+  // Set to "1", "true", or "yes" to send the 'to' field as an array (some APIs require this).
+  MFA_EMAIL_HTTP_TO_ARRAY?: string;
 }
 
 export type UserRole = 'admin' | 'user';

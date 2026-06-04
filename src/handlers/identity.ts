@@ -344,7 +344,7 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
       if (!hasProvider || !hasToken) {
         const challengeCtx = { user, env, db: env.DB, twoFactorRows, request };
         const challengeData = new Map<number, unknown>();
-        // H2: per-provider try-catch — a failing provider (e.g. Email→Resend outage) must not
+        // H2: per-provider try-catch — a failing provider (e.g. Email backend outage) must not
         // block other providers. Only skip the failing provider; log server-side.
         const availableForChallenge: TwoFactorProvider[] = [];
         for (const p of enabledProviders) {

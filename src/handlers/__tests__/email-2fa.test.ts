@@ -2,14 +2,14 @@
  * email-2fa.test.ts
  *
  * 单测覆盖：
- *  1. EmailSender (ResendEmailSender) — 发送成功、HTTP 错误、网络错误
- *  2. EmailTwoFactorProvider.isAvailable — 有/无配置
- *  3. EmailTwoFactorProvider.isEnabledForUser — 有/无 atype=1 enrollment
- *  4. EmailTwoFactorProvider.buildChallenge — 生成并存储 code、调用 sender、返回 masked email
- *  5. EmailTwoFactorProvider.verify — 正确码、错误码、TTL 过期、超出最大尝试次数
- *  6. handleSendEmailLogin — 未配置返回 200、用户不存在返回 200、密码错误返回 200、成功发码
- *  7. maskEmail helper
- *  8. generateNumericCode — 6 位数字
+ *  1. EmailTwoFactorProvider.isAvailable — HTTP backend / CF-only / 无配置
+ *  2. EmailTwoFactorProvider.isEnabledForUser — 有/无 atype=1 enrollment
+ *  3. EmailTwoFactorProvider.buildChallenge — 生成并存储 code、调用 sender、返回 masked email
+ *  4. EmailTwoFactorProvider.verify — 正确码、错误码、TTL 过期、超出最大尝试次数
+ *  5. handleSendEmailLogin — 未配置返回 200、用户不存在返回 200、密码错误返回 200、成功发码
+ *  6. maskEmail helper
+ *  7. generateNumericCode — 6 位数字
+ *  8. handleGetEmailTwoFactor — available 标志反映服务端配置
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -95,7 +95,6 @@ vi.mock('../sends', () => ({
 // Imports (after mocks are registered)
 // ---------------------------------------------------------------------------
 
-import { ResendEmailSender } from '../../services/email-sender';
 import {
   emailProvider,
   EMAIL_ENROLLMENT_ATYPE,
@@ -162,11 +161,13 @@ function makeChallengeRow(overrides: Partial<{ code: string; createdAt: number; 
   };
 }
 
+// Env configured with generic HTTP backend (drives all existing send-path tests).
 const fakeEnv = {
   DB: {} as D1Database,
   JWT_SECRET: 'test-secret-at-least-32-characters-long',
   NOTIFICATIONS_HUB: {} as DurableObjectNamespace,
-  RESEND_API_KEY: 're_test_key',
+  MFA_EMAIL_HTTP_ENDPOINT: 'http://localhost:9876/send',
+  MFA_EMAIL_HTTP_AUTH: 'Bearer test-token',
   MFA_EMAIL_FROM: 'noreply@example.com',
 };
 
@@ -174,89 +175,38 @@ const fakeEnvNoEmail = {
   DB: {} as D1Database,
   JWT_SECRET: 'test-secret-at-least-32-characters-long',
   NOTIFICATIONS_HUB: {} as DurableObjectNamespace,
-  // No RESEND_API_KEY / MFA_EMAIL_FROM
+  // No MFA_EMAIL_FROM / no backend configured
 };
 
 // ---------------------------------------------------------------------------
-// 1. ResendEmailSender
-// ---------------------------------------------------------------------------
-
-describe('ResendEmailSender', () => {
-  beforeEach(() => vi.clearAllMocks());
-
-  it('sends successfully when API returns 200', async () => {
-    mockFetch.mockResolvedValueOnce(new Response('{"id":"abc"}', { status: 200 }));
-    const sender = new ResendEmailSender('re_test', 'from@example.com');
-    await expect(sender.send({ to: 'to@example.com', subject: 'Test', text: 'body' })).resolves.toBeUndefined();
-    expect(mockFetch).toHaveBeenCalledOnce();
-    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://api.resend.com/emails');
-    const body = JSON.parse(init.body as string);
-    expect(body.to).toEqual(['to@example.com']);
-    expect(body.from).toBe('from@example.com');
-  });
-
-  it('throws on HTTP 422 error from Resend', async () => {
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify({ message: 'Invalid API key' }), { status: 422 })
-    );
-    const sender = new ResendEmailSender('bad_key', 'from@example.com');
-    await expect(sender.send({ to: 'to@example.com', subject: 'Test', text: 'body' }))
-      .rejects.toThrow('Email send failed (HTTP 422)');
-  });
-
-  it('throws on network error', async () => {
-    mockFetch.mockRejectedValueOnce(new Error('Network unreachable'));
-    const sender = new ResendEmailSender('re_test', 'from@example.com');
-    await expect(sender.send({ to: 'to@example.com', subject: 'Test', text: 'body' }))
-      .rejects.toThrow('Email send network error');
-  });
-
-  it('uses RESEND_BASE_URL override when provided', async () => {
-    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
-    // Simulate a local mock server at :9876 — URL must be used verbatim.
-    const sender = new ResendEmailSender('re_test', 'from@example.com', 'http://localhost:9876/emails');
-    await sender.send({ to: 'to@example.com', subject: 'Test', text: 'body' });
-    const [url] = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('http://localhost:9876/emails');
-    expect(url).not.toContain('api.resend.com');
-  });
-
-  it('buildEmailSenderFromEnv passes RESEND_BASE_URL through to sender', async () => {
-    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
-    const { buildEmailSenderFromEnv } = await import('../../services/email-sender');
-    const sender = buildEmailSenderFromEnv({
-      RESEND_API_KEY: 're_test',
-      MFA_EMAIL_FROM: 'from@example.com',
-      RESEND_BASE_URL: 'http://localhost:9876/emails',
-    });
-    expect(sender).not.toBeNull();
-    await sender!.send({ to: 'to@example.com', subject: 'Test', text: 'body' });
-    const [url] = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('http://localhost:9876/emails');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 2. EmailTwoFactorProvider — isAvailable
+// 1. EmailTwoFactorProvider — isAvailable
 // ---------------------------------------------------------------------------
 
 describe('emailProvider.isAvailable', () => {
-  it('returns false when env has no RESEND_API_KEY', () => {
+  it('returns false when no email backend is configured', () => {
     expect(emailProvider.isAvailable(fakeEnvNoEmail as typeof fakeEnv)).toBe(false);
   });
 
-  it('returns false when only RESEND_API_KEY is set', () => {
-    expect(emailProvider.isAvailable({ ...fakeEnvNoEmail, RESEND_API_KEY: 're_test' } as typeof fakeEnv)).toBe(false);
+  it('returns false when only MFA_EMAIL_FROM is set (no backend)', () => {
+    expect(emailProvider.isAvailable({ ...fakeEnvNoEmail, MFA_EMAIL_FROM: 'noreply@example.com' } as typeof fakeEnv)).toBe(false);
   });
 
-  it('returns true when both RESEND_API_KEY and MFA_EMAIL_FROM are set', () => {
+  it('returns true when generic HTTP backend + MFA_EMAIL_FROM are set', () => {
     expect(emailProvider.isAvailable(fakeEnv as typeof fakeEnv)).toBe(true);
+  });
+
+  it('returns true when Cloudflare EMAIL binding + MFA_EMAIL_FROM are set (CF-only deployment)', () => {
+    const cfEnv = {
+      ...fakeEnvNoEmail,
+      MFA_EMAIL_FROM: 'noreply@example.com',
+      EMAIL: { send: vi.fn().mockResolvedValue({ messageId: 'cf-msg-001' }) },
+    };
+    expect(emailProvider.isAvailable(cfEnv as unknown as typeof fakeEnv)).toBe(true);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 3. EmailTwoFactorProvider — isEnabledForUser
+// 2. EmailTwoFactorProvider — isEnabledForUser
 // ---------------------------------------------------------------------------
 
 describe('emailProvider.isEnabledForUser', () => {
@@ -282,7 +232,7 @@ describe('emailProvider.isEnabledForUser', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. EmailTwoFactorProvider — buildChallenge
+// 3. EmailTwoFactorProvider — buildChallenge
 // ---------------------------------------------------------------------------
 
 describe('emailProvider.buildChallenge', () => {
@@ -325,11 +275,14 @@ describe('emailProvider.buildChallenge', () => {
     expect(stored.code).toHaveLength(6);
     expect(/^\d{6}$/.test(stored.code)).toBe(true);
     expect(stored.attempts).toBe(0);
-    expect(mockFetch).toHaveBeenCalledOnce(); // Resend API call
+    expect(mockFetch).toHaveBeenCalledOnce(); // HTTP API call
   });
 
-  it('throws if Resend API fails (send failure must not be swallowed)', async () => {
-    mockFetch.mockResolvedValueOnce(new Response('{"message":"API error"}', { status: 500 }));
+  it('throws if email API fails (send failure must not be swallowed)', async () => {
+    // First attempt + one retry both fail.
+    mockFetch
+      .mockResolvedValueOnce(new Response('{"message":"API error"}', { status: 500 }))
+      .mockResolvedValueOnce(new Response('{"message":"API error"}', { status: 500 }));
     const ctx = {
       user: makeUser(),
       env: fakeEnv as typeof fakeEnv,
@@ -341,7 +294,7 @@ describe('emailProvider.buildChallenge', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. EmailTwoFactorProvider — verify
+// 4. EmailTwoFactorProvider — verify
 // ---------------------------------------------------------------------------
 
 describe('emailProvider.verify', () => {
@@ -403,7 +356,7 @@ describe('emailProvider.verify', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. handleSendEmailLogin
+// 5. handleSendEmailLogin
 // ---------------------------------------------------------------------------
 
 describe('handleSendEmailLogin', () => {
@@ -473,14 +426,17 @@ describe('handleSendEmailLogin', () => {
     );
     expect(resp.status).toBe(200);
     expect(mockUpsertTwoFactor).toHaveBeenCalledOnce(); // code stored
-    expect(mockFetch).toHaveBeenCalledOnce();           // code sent
+    expect(mockFetch).toHaveBeenCalledOnce();           // code sent via HTTP backend
   });
 
-  it('returns 500 when Resend API fails (send failure must not be swallowed)', async () => {
+  it('returns 500 when email API fails (send failure must not be swallowed)', async () => {
     mockStorageGetUser.mockResolvedValueOnce(makeUser());
     mockAuthVerify.mockResolvedValueOnce(true);
     mockGetTwoFactor.mockResolvedValueOnce(makeEnrollmentRow());
-    mockFetch.mockResolvedValueOnce(new Response('{"message":"rate limit"}', { status: 429 }));
+    // Both retry attempts fail.
+    mockFetch
+      .mockResolvedValueOnce(new Response('{"message":"rate limit"}', { status: 429 }))
+      .mockResolvedValueOnce(new Response('{"message":"rate limit"}', { status: 429 }));
 
     const resp = await handleSendEmailLogin(
       makeRequest({ email: 'test@example.com', masterPasswordHash: 'hash' }),
@@ -493,7 +449,7 @@ describe('handleSendEmailLogin', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 7. maskEmail helper
+// 6. maskEmail helper
 // ---------------------------------------------------------------------------
 
 describe('maskEmail', () => {
@@ -512,7 +468,7 @@ describe('maskEmail', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 8. generateNumericCode helper
+// 7. generateNumericCode helper
 // ---------------------------------------------------------------------------
 
 describe('generateNumericCode', () => {
@@ -532,7 +488,7 @@ describe('generateNumericCode', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 9. handleGetEmailTwoFactor — available flag reflects server configuration
+// 8. handleGetEmailTwoFactor — available flag reflects server configuration
 // ---------------------------------------------------------------------------
 
 describe('handleGetEmailTwoFactor — available flag', () => {
@@ -544,7 +500,10 @@ describe('handleGetEmailTwoFactor — available flag', () => {
     return {
       DB: {} as D1Database,
       JWT_SECRET: 'test',
-      ...(configured ? { RESEND_API_KEY: 're_key', MFA_EMAIL_FROM: 'noreply@example.com' } : {}),
+      ...(configured ? {
+        MFA_EMAIL_HTTP_ENDPOINT: 'http://localhost:9876/send',
+        MFA_EMAIL_FROM: 'noreply@example.com',
+      } : {}),
     } as unknown as import('../../types').Env;
   }
 
@@ -554,7 +513,7 @@ describe('handleGetEmailTwoFactor — available flag', () => {
     mockGetTwoFactor.mockResolvedValue(null);
   });
 
-  it('returns available=true when RESEND_API_KEY and MFA_EMAIL_FROM are set', async () => {
+  it('returns available=true when HTTP endpoint and MFA_EMAIL_FROM are set', async () => {
     const resp = await handleGetEmailTwoFactor(makeGetRequest(), makeEnv(true), 'user-001');
     expect(resp.status).toBe(200);
     const body = await resp.json() as { available: boolean; enabled: boolean };
@@ -562,11 +521,25 @@ describe('handleGetEmailTwoFactor — available flag', () => {
     expect(body.enabled).toBe(false); // no enrollment row
   });
 
-  it('returns available=false when email provider env vars are missing', async () => {
+  it('returns available=false when email backend env vars are missing', async () => {
     const resp = await handleGetEmailTwoFactor(makeGetRequest(), makeEnv(false), 'user-001');
     expect(resp.status).toBe(200);
     const body = await resp.json() as { available: boolean; enabled: boolean };
     expect(body.available).toBe(false);
+  });
+
+  it('returns available=true for CF-only deployment (EMAIL binding + MFA_EMAIL_FROM)', async () => {
+    const cfEnv = {
+      DB: {} as D1Database,
+      JWT_SECRET: 'test',
+      MFA_EMAIL_FROM: 'noreply@example.com',
+      EMAIL: { send: vi.fn().mockResolvedValue({ messageId: 'cf-001' }) },
+    } as unknown as import('../../types').Env;
+    mockStorageGetUserById.mockResolvedValue(makeUser());
+    mockGetTwoFactor.mockResolvedValue(null);
+    const resp = await handleGetEmailTwoFactor(makeGetRequest(), cfEnv, 'user-001');
+    const body = await resp.json() as { available: boolean };
+    expect(body.available).toBe(true);
   });
 
   it('returns enabled=true when enrollment row exists and available=true', async () => {

@@ -21,7 +21,7 @@ import {
   maskEmail,
   CODE_TTL_S,
 } from '../services/two-factor/email-provider';
-import { buildEmailSenderFromEnv } from '../services/email-sender';
+import { buildEmailSenderFromEnv, isEmailSenderConfigured } from '../services/email-sender';
 
 // CONTRACT:
 // users.master_password_hash is server-side login verification only. It does
@@ -1314,8 +1314,8 @@ export async function handleGetEmailTwoFactor(request: Request, env: Env, userId
   const user = await storage.getUserById(userId);
   if (!user) return errorResponse('User not found', 404);
 
-  // available = email provider is configured (RESEND_API_KEY + MFA_EMAIL_FROM must be set)
-  const available = !!(env.RESEND_API_KEY && env.MFA_EMAIL_FROM);
+  // available = email provider is configured (MFA_EMAIL_FROM + at least one sending backend)
+  const available = isEmailSenderConfigured(env);
 
   const row = await getTwoFactor(env.DB, userId, EMAIL_ENROLLMENT_ATYPE);
   const enabled = row?.enabled ?? false;
@@ -1341,7 +1341,7 @@ export async function handleGetEmailTwoFactor(request: Request, env: Env, userId
  * Body: { email, masterPasswordHash }
  */
 export async function handleSendEmailSetup(request: Request, env: Env, userId: string): Promise<Response> {
-  if (!env.RESEND_API_KEY || !env.MFA_EMAIL_FROM) {
+  if (!isEmailSenderConfigured(env)) {
     return errorResponse('Email 2FA is not configured on this server', 503);
   }
 
@@ -1421,7 +1421,7 @@ export async function handleSendEmailSetup(request: Request, env: Env, userId: s
  * Body: { email, masterPasswordHash, token }
  */
 export async function handleEnableEmailTwoFactor(request: Request, env: Env, userId: string): Promise<Response> {
-  if (!env.RESEND_API_KEY || !env.MFA_EMAIL_FROM) {
+  if (!isEmailSenderConfigured(env)) {
     return errorResponse('Email 2FA is not configured on this server', 503);
   }
 
@@ -1591,7 +1591,7 @@ export async function handleDisableEmailTwoFactor(request: Request, env: Env, us
  * Body: { masterPasswordHash: string }
  */
 export async function handleReenableEmailTwoFactor(request: Request, env: Env, userId: string): Promise<Response> {
-  if (!env.RESEND_API_KEY || !env.MFA_EMAIL_FROM) {
+  if (!isEmailSenderConfigured(env)) {
     return errorResponse('Email 2FA is not configured on this server', 503);
   }
 

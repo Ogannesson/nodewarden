@@ -4,11 +4,39 @@
 # (Example only, 64 hex chars = 32 bytes)
 JWT_SECRET=Enter-your-JWT-key-here-at-least-32-characters
 
-# Email 2FA (optional — leave blank to disable Email 2FA entirely)
-# Sign up at https://resend.com and verify your sending domain.
-# RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# Email 2FA (optional — leave both backends blank to disable Email 2FA entirely)
+#
+# Required for any backend:
 # MFA_EMAIL_FROM=noreply@your-domain.com
+#
+# Optional: override backend selection ('cloudflare' | 'http' | 'auto').
+# Default 'auto' tries Cloudflare Email first, falls back to HTTP if configured.
+# MFA_EMAIL_PROVIDER=auto
 
-# Local testing: point to a mock HTTP server instead of real Resend.
-# The mock server must accept POST and return { "id": "..." } with HTTP 200.
-# RESEND_BASE_URL=http://localhost:9876/emails
+# ---------------------------------------------------------------------------
+# Option A — Cloudflare Email Sending (recommended default)
+# ---------------------------------------------------------------------------
+# Declare a [[send_email]] binding in wrangler.toml (already present).
+# The EMAIL binding is injected at runtime; no env var needed.
+# Requires Workers Paid plan + verified sending domain in your Cloudflare account.
+# Use 'wrangler dev' with remote=true to test against the real service.
+
+# ---------------------------------------------------------------------------
+# Option B — Generic HTTP endpoint (any flat-JSON email API)
+# ---------------------------------------------------------------------------
+# Point at any HTTP endpoint that accepts a flat JSON body and returns 2xx on success.
+# Example (replace with your own endpoint):
+# MFA_EMAIL_HTTP_ENDPOINT=https://your-email-api.example/send
+# MFA_EMAIL_HTTP_AUTH=Bearer your-api-token-here
+#
+# Optional: extra headers as a JSON object (merged with Authorization).
+# MFA_EMAIL_HTTP_HEADERS={"X-Custom-Header":"value"}
+#
+# Optional: extra body fields as a JSON object added to every request.
+# MFA_EMAIL_HTTP_BODY={"source":"nodewarden"}
+#
+# Optional: set to "1" if the endpoint requires 'to' as an array instead of a string.
+# MFA_EMAIL_HTTP_TO_ARRAY=0
+#
+# Local testing mock (returns 2xx, no real email sent):
+# MFA_EMAIL_HTTP_ENDPOINT=http://localhost:9876/send

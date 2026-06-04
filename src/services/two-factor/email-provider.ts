@@ -32,7 +32,7 @@ import type {
   VerifyContext,
 } from './types';
 import { TwoFactorType } from './types';
-import { buildEmailSenderFromEnv } from '../email-sender';
+import { buildEmailSenderFromEnv, isEmailSenderConfigured } from '../email-sender';
 import { timingSafeEqual } from '../../utils/passkey';
 import { safeWriteAuditEvent } from '../audit-events';
 
@@ -116,9 +116,9 @@ async function constantTimeEqualStrings(a: string, b: string): Promise<boolean> 
 class EmailTwoFactorProvider implements TwoFactorProvider {
   readonly type: TwoFactorTypeValue = TwoFactorType.Email;
 
-  /** Available only when RESEND_API_KEY + MFA_EMAIL_FROM are configured. */
+  /** Available only when the email sending stack is configured (MFA_EMAIL_FROM + at least one backend). */
   isAvailable(env: Env): boolean {
-    return !!(env.RESEND_API_KEY && env.MFA_EMAIL_FROM);
+    return isEmailSenderConfigured(env);
   }
 
   /** Enabled for a user if they have an atype=1 enabled row in two_factors. */
@@ -161,7 +161,7 @@ class EmailTwoFactorProvider implements TwoFactorProvider {
     // Send the code — failure MUST throw (no silent swallowing).
     const sender = buildEmailSenderFromEnv(env);
     if (!sender) {
-      throw new Error('Email sender not configured (RESEND_API_KEY / MFA_EMAIL_FROM missing)');
+      throw new Error('Email sender not configured (MFA_EMAIL_FROM / email backend missing)');
     }
     await sender.send({
       to: targetEmail,

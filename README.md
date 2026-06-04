@@ -43,7 +43,7 @@
 | TOTP / Steam TOTP | ✅ | ✅ | 含 `steam://` 支持 |
 | 多用户 | ✅ | ✅ | 支持邀请码注册 |
 | 组织 / 集合 / 成员权限 | ✅ | ❌ | 未实现 |
-| 登录 2FA | ✅ | ✅ | TOTP、WebAuthn/FIDO2 安全密钥、Email 验证码（需配置 `RESEND_API_KEY`） |
+| 登录 2FA | ✅ | ✅ | TOTP、WebAuthn/FIDO2 安全密钥、Email 验证码（Cloudflare 或自定义 HTTP 发送通道） |
 | SSO / SCIM / 企业目录 | ✅ | ❌ | 未实现 |
 
 ---
@@ -152,7 +152,7 @@ NodeWarden 支持三种两步验证方式，可在 Web Vault **设置 → 两步
 |---|---|---|
 | **TOTP / 验证器 App** | 无需额外配置 | 扫码绑定 Google Authenticator、1Password、Bitwarden 等任意 TOTP App |
 | **WebAuthn / FIDO2 安全密钥** | 无需额外配置 | 支持 YubiKey、Touch ID、Windows Hello 等硬件或平台认证器 |
-| **Email 验证码** | 需配置 `RESEND_API_KEY` + `MFA_EMAIL_FROM`（见 `.dev.vars.example`） | 登录时向绑定邮箱发送 6 位验证码，10 分钟内有效 |
+| **Email 验证码** | 二选一：① Cloudflare Email 绑定（`[[send_email]]` + `MFA_EMAIL_FROM`）② 通用 HTTP 端点（`MFA_EMAIL_HTTP_ENDPOINT` + `MFA_EMAIL_HTTP_AUTH` + `MFA_EMAIL_FROM`），详见 `.dev.vars.example` | 登录时向绑定邮箱发送 6 位验证码，10 分钟内有效 |
 
 三种方式可同时启用；账户均拥有一个**恢复码**，用于在所有 2FA 方式均不可用时紧急恢复访问。
 

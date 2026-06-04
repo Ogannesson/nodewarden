@@ -1087,7 +1087,7 @@ export async function getEmailTwoFactorStatus(authedFetch: AuthedFetch): Promise
     throw new Error(translateServerError(body?.error_description || body?.error, t('txt_email_mfa_load_failed')));
   }
   const result = (await parseJson<{ enabled?: boolean; available?: boolean; configured?: boolean }>(resp)) || {};
-  // available is explicitly returned by the server (true only when RESEND_API_KEY + MFA_EMAIL_FROM are set)
+  // available is explicitly returned by the server (true only when an email channel — Cloudflare binding or custom HTTP — is configured)
   return { enabled: !!result.enabled, available: !!result.available, configured: !!result.configured };
 }
 

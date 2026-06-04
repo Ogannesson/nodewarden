@@ -32,7 +32,7 @@ import { emailProvider } from './email-provider';
 const ALL_PROVIDERS: readonly TwoFactorProvider[] = [
   totpProvider,
   webAuthnProvider, // P1: WebAuthn/FIDO2 (atype=7)
-  emailProvider,    // P2: Email OTP (atype=1) — only active when RESEND_API_KEY configured
+  emailProvider,    // P2: Email OTP (atype=1) — only active when an email backend is configured
   // P3: yubiKeyProvider will be added here
 ];
 

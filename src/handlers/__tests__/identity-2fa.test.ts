@@ -655,7 +655,7 @@ describe('handleToken (password grant) – H2: buildChallenge 韧性', () => {
     ]);
 
     // 注意：Email provider 的 buildChallenge 会调用 email sender；
-    // fakeEnv 没有 RESEND_API_KEY，所以 buildChallenge 会抛异常
+    // fakeEnv 没有配置 email 后端，所以 buildChallenge 会抛异常
     // → 期望：TOTP provider 的挑战仍然正常返回，整体返回 400（不是 500）
 
     const req = makeRequest(makePasswordBody({}));

@@ -82,7 +82,7 @@ export interface TwoFactorProvider {
 
   /**
    * True if this provider is available for use on this deployment.
-   * Example: Email returns false if RESEND_API_KEY is not configured.
+   * Example: Email returns false if no email backend is configured.
    * TOTP always returns true (no external dependency).
    */
   isAvailable(env: Env): boolean;
