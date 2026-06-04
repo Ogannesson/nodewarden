@@ -80,18 +80,36 @@ export interface HttpEmailConfig {
   extraBody?: Record<string, unknown>;
   /** HTTP status codes treated as success. Defaults to any 2xx. */
   successStatuses?: number[];
+  /**
+   * Parsed JSON body template for APIs that require nested request structures.
+   * When present, the template drives the entire body and flat-mode fields
+   * (fieldMap / toAsArray / extraBody) are ignored.
+   * See HttpEmailSender for placeholder syntax.
+   */
+  bodyTemplate?: unknown;
 }
 
 /**
- * Sends email via a generic flat-JSON HTTP endpoint.
+ * Sends email via a generic HTTP endpoint supporting both flat-JSON and nested-JSON bodies.
  *
- * Body is always constructed programmatically to prevent JSON injection
- * from user-supplied fields (e.g. the 'to' address). Secrets are never
+ * **Flat mode** (default): body fields are constructed programmatically using
+ * fieldMap / toAsArray / extraBody — identical to previous behaviour.
+ *
+ * **Template mode** (when bodyTemplate is set): a JSON body template stored in
+ * MFA_EMAIL_HTTP_BODY_TEMPLATE is deep-cloned and recursively traversed; leaf
+ * values that exactly match a placeholder string are replaced with the
+ * corresponding message field.  Placeholders (whole-value match only — partial
+ * embedding like "Hi {{to}}" is NOT supported):
+ *   "{{from}}"    → sender address (from config)
+ *   "{{to}}"      → message.to
+ *   "{{subject}}" → message.subject
+ *   "{{text}}"    → message.text
+ *   "{{html}}"    → message.html  (key is omitted when html is undefined)
+ *
+ * In both modes the body is always constructed programmatically — never by
+ * string-splicing then re-parsing — so JSON injection from user-controlled
+ * fields (to, subject, …) is structurally impossible.  Secrets are never
  * logged or included in thrown error messages.
- *
- * Limitation: only flat JSON request bodies are supported. APIs with nested
- * structures (e.g. personalizations arrays) are out of scope and can be
- * addressed as a future enhancement.
  */
 export class HttpEmailSender implements EmailSender {
   private readonly config: Required<Pick<HttpEmailConfig, 'endpoint' | 'method' | 'headers' | 'from' | 'toAsArray' | 'extraBody'>> & HttpEmailConfig;
@@ -109,23 +127,34 @@ export class HttpEmailSender implements EmailSender {
   }
 
   async send(message: EmailMessage): Promise<void> {
-    const { endpoint, method, headers, from, fieldMap = {}, toAsArray, extraBody = {}, successStatuses } = this.config;
+    const { endpoint, method, headers, from, fieldMap = {}, toAsArray, extraBody = {}, successStatuses, bodyTemplate } = this.config;
 
-    // Resolve field names (with defaults).
-    const fFrom    = fieldMap.from    ?? 'from';
-    const fTo      = fieldMap.to      ?? 'to';
-    const fSubject = fieldMap.subject ?? 'subject';
-    const fText    = fieldMap.text    ?? 'text';
-    const fHtml    = fieldMap.html    ?? 'html';
+    let body: unknown;
 
-    // Build body programmatically — never via string templates.
-    const body: Record<string, unknown> = { ...extraBody };
-    body[fFrom]    = from;
-    body[fTo]      = toAsArray ? [message.to] : message.to;
-    body[fSubject] = message.subject;
-    body[fText]    = message.text;
-    if (message.html !== undefined && !(fHtml in body)) {
-      body[fHtml] = message.html;
+    if (bodyTemplate !== undefined) {
+      // Template mode: recursively clone the template and replace placeholder strings.
+      // All substitution happens on the parsed object tree — never by string-splicing —
+      // so user-controlled values (to, subject, …) cannot break the JSON structure.
+      body = HttpEmailSender.applyTemplate(bodyTemplate, from, message);
+    } else {
+      // Flat mode (backward-compatible): construct body from fieldMap / toAsArray / extraBody.
+      // Resolve field names (with defaults).
+      const fFrom    = fieldMap.from    ?? 'from';
+      const fTo      = fieldMap.to      ?? 'to';
+      const fSubject = fieldMap.subject ?? 'subject';
+      const fText    = fieldMap.text    ?? 'text';
+      const fHtml    = fieldMap.html    ?? 'html';
+
+      // Build body programmatically — never via string templates.
+      const flatBody: Record<string, unknown> = { ...extraBody };
+      flatBody[fFrom]    = from;
+      flatBody[fTo]      = toAsArray ? [message.to] : message.to;
+      flatBody[fSubject] = message.subject;
+      flatBody[fText]    = message.text;
+      if (message.html !== undefined && !(fHtml in flatBody)) {
+        flatBody[fHtml] = message.html;
+      }
+      body = flatBody;
     }
 
     let resp: Response;
@@ -162,6 +191,73 @@ export class HttpEmailSender implements EmailSender {
         `Email send failed (HTTP ${resp.status}): ${detail || resp.statusText}`
       );
     }
+  }
+
+  /**
+   * Recursively deep-clone `node` and substitute placeholder strings.
+   *
+   * Recognised placeholders (whole-value match only):
+   *   "{{from}}"    → from (sender address)
+   *   "{{to}}"      → message.to
+   *   "{{subject}}" → message.subject
+   *   "{{text}}"    → message.text
+   *   "{{html}}"    → message.html  (sentinel OMIT when html is undefined)
+   *
+   * When message.html is undefined the special OMIT sentinel is substituted
+   * for "{{html}}".  The caller trims OMIT values from objects (key deleted)
+   * and arrays (element filtered out), so templates referencing html_content
+   * cleanly disappear when no HTML body is supplied.
+   *
+   * All replacement happens on the parsed object tree — never by
+   * string-splicing — making JSON injection structurally impossible.
+   */
+  private static readonly OMIT = Symbol('omit');
+
+  private static applyTemplate(
+    node: unknown,
+    from: string,
+    message: EmailMessage,
+  ): unknown {
+    const htmlValue: unknown = message.html !== undefined
+      ? message.html
+      : HttpEmailSender.OMIT;
+
+    const substitute = (value: unknown): unknown => {
+      if (typeof value === 'string') {
+        // Whole-value placeholder match only (partial embedding is not supported).
+        switch (value) {
+          case '{{from}}':    return from;
+          case '{{to}}':      return message.to;
+          case '{{subject}}': return message.subject;
+          case '{{text}}':    return message.text;
+          case '{{html}}':    return htmlValue;
+          default:            return value;
+        }
+      }
+
+      if (Array.isArray(value)) {
+        return value
+          .map(substitute)
+          .filter((v) => v !== HttpEmailSender.OMIT);
+      }
+
+      if (typeof value === 'object' && value !== null) {
+        const result: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+          const substituted = substitute(v);
+          if (substituted !== HttpEmailSender.OMIT) {
+            result[k] = substituted;
+          }
+          // Key is omitted when value resolves to OMIT (e.g. html_content when no html).
+        }
+        return result;
+      }
+
+      // number, boolean, null — pass through unchanged.
+      return value;
+    };
+
+    return substitute(node);
   }
 }
 
@@ -256,6 +352,7 @@ function buildHttpConfig(
     MFA_EMAIL_HTTP_HEADERS?: string;
     MFA_EMAIL_HTTP_BODY?: string;
     MFA_EMAIL_HTTP_TO_ARRAY?: string;
+    MFA_EMAIL_HTTP_BODY_TEMPLATE?: string;
   },
   from: string,
 ): HttpEmailConfig {
@@ -267,12 +364,27 @@ function buildHttpConfig(
   const extraBody = parseJsonEnv(env.MFA_EMAIL_HTTP_BODY, 'MFA_EMAIL_HTTP_BODY');
   const toAsArray = /^(1|true|yes)$/i.test((env.MFA_EMAIL_HTTP_TO_ARRAY ?? '').trim());
 
+  // Template mode: parse the body template if supplied.
+  // When present it takes over from flat-mode fields (extraBody / toAsArray / fieldMap).
+  // Unlike extraBody/extraHeaders which must be objects, the template may be any valid
+  // JSON root (object or array) — applyTemplate handles both. Parse independently
+  // rather than reusing parseJsonEnv to avoid the object-only restriction.
+  let bodyTemplate: unknown;
+  if (env.MFA_EMAIL_HTTP_BODY_TEMPLATE?.trim()) {
+    try {
+      bodyTemplate = JSON.parse(env.MFA_EMAIL_HTTP_BODY_TEMPLATE);
+    } catch {
+      throw new Error('MFA_EMAIL_HTTP_BODY_TEMPLATE: invalid JSON');
+    }
+  }
+
   return {
     endpoint: env.MFA_EMAIL_HTTP_ENDPOINT!,
     headers,
     from,
     extraBody,
     toAsArray,
+    ...(bodyTemplate !== undefined ? { bodyTemplate } : {}),
   };
 }
 
@@ -327,6 +439,7 @@ export function buildEmailSenderFromEnv(env: {
   MFA_EMAIL_HTTP_HEADERS?: string;
   MFA_EMAIL_HTTP_BODY?: string;
   MFA_EMAIL_HTTP_TO_ARRAY?: string;
+  MFA_EMAIL_HTTP_BODY_TEMPLATE?: string;
 }): EmailSender | null {
   if (!env.MFA_EMAIL_FROM?.trim()) return null;
   const from     = env.MFA_EMAIL_FROM.trim();

@@ -242,6 +242,295 @@ describe('HttpEmailSender', () => {
 });
 
 // ---------------------------------------------------------------------------
+// HttpEmailSender — 模板模式（bodyTemplate）
+// ---------------------------------------------------------------------------
+
+describe('HttpEmailSender bodyTemplate mode', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeConfig(overrides: Partial<HttpEmailConfig> = {}): HttpEmailConfig {
+    return {
+      endpoint: 'https://api.example.com/send',
+      from: 'sender@example.com',
+      ...overrides,
+    };
+  }
+
+  // --- 嵌套结构：from 作为嵌套对象 ---
+  it('replaces nested from object: { from: { email: "{{from}}" } }', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      from: { email: '{{from}}' },
+      to: '{{to}}',
+      subject: '{{subject}}',
+      text: '{{text}}',
+    };
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    await sender.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.from).toEqual({ email: 'sender@example.com' });
+    expect(body.to).toBe('recipient@example.com');
+    expect(body.subject).toBe('Test Subject');
+    expect(body.text).toBe('Hello from test');
+  });
+
+  // --- 收件人作为对象数组：recipients:[{ email: "{{to}}" }] ---
+  it('replaces placeholder inside recipient object array: recipients: [{ email: "{{to}}" }]', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      from: { email: '{{from}}' },
+      recipients: [{ email: '{{to}}', type: 'to' }],
+      subject: '{{subject}}',
+      text_content: '{{text}}',
+    };
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    await sender.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.recipients).toEqual([{ email: 'recipient@example.com', type: 'to' }]);
+    expect(body.from).toEqual({ email: 'sender@example.com' });
+  });
+
+  // --- 异名字段：text_content / html_content ---
+  it('replaces text_content and html_content (renamed fields) correctly', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      from: { email: '{{from}}' },
+      recipients: [{ email: '{{to}}' }],
+      subject: '{{subject}}',
+      text_content: '{{text}}',
+      html_content: '{{html}}',
+    };
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    await sender.send(sampleMessageWithHtml);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.text_content).toBe('Hello from test');
+    expect(body.html_content).toBe('<p>Hello from test</p>');
+  });
+
+  // --- 静态字段原样保留 ---
+  it('preserves static (non-placeholder) fields unchanged', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      sandbox: true,
+      api_version: 2,
+      metadata: { source: 'nodewarden' },
+      from: { email: '{{from}}' },
+      to: '{{to}}',
+      subject: '{{subject}}',
+      text: '{{text}}',
+    };
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    await sender.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.sandbox).toBe(true);
+    expect(body.api_version).toBe(2);
+    expect(body.metadata).toEqual({ source: 'nodewarden' });
+  });
+
+  // --- html undefined → html_content 字段被删除 ---
+  it('removes html_content key entirely when message.html is undefined', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      from: { email: '{{from}}' },
+      recipients: [{ email: '{{to}}' }],
+      subject: '{{subject}}',
+      text_content: '{{text}}',
+      html_content: '{{html}}',
+    };
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    // sampleMessage has no html
+    await sender.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).not.toHaveProperty('html_content');
+    expect(body.text_content).toBe('Hello from test');
+  });
+
+  // --- html undefined → 数组内的 {{html}} 元素被过滤掉 ---
+  it('filters out {{html}} placeholder element from array when html is undefined', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      to: '{{to}}',
+      parts: ['{{text}}', '{{html}}'],
+    };
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    await sender.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    // 只剩 text 对应的元素，html 对应的已被过滤
+    expect(body.parts).toEqual(['Hello from test']);
+  });
+
+  // --- 注入安全：to 字段含 JSON 特殊字符不破坏结构 ---
+  it('injection safety: to field with JSON-special chars does not break body structure', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      from: { email: '{{from}}' },
+      to: '{{to}}',
+      subject: '{{subject}}',
+      text: '{{text}}',
+    };
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    // 恶意 to 值，若用字符串拼接会破坏 JSON
+    const maliciousMessage: EmailMessage = {
+      to: 'a","x":"y',
+      subject: 'Injection Test',
+      text: 'Test body',
+    };
+    await sender.send(maliciousMessage);
+
+    // 重新解析，确认结构完好（不会有额外的 "x" 键）
+    const rawBody = (mockFetch.mock.calls[0][1] as RequestInit).body as string;
+    const body = JSON.parse(rawBody); // 能解析说明 JSON 结构完好
+    expect(body.to).toBe('a","x":"y'); // 作为 JSON 字符串字面量保存
+    expect(body).not.toHaveProperty('x'); // 没有注入成功的额外键
+    expect(body.from).toEqual({ email: 'sender@example.com' }); // 其它字段完好
+  });
+
+  // --- 整值匹配：内嵌占位符（"Hi {{to}}"）不整体替换 ---
+  it('does not replace embedded/partial placeholder "Hi {{to}}" — whole-value match only', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      to: '{{to}}',                       // 整值 → 替换
+      greeting: 'Hi {{to}}',             // 内嵌 → 不替换（原样保留）
+    };
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    await sender.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.to).toBe('recipient@example.com');          // 整值匹配 → 替换成功
+    expect(body.greeting).toBe('Hi {{to}}');               // 内嵌 → 不替换
+  });
+
+  // --- 向后兼容：无模板时仍走扁平模式 ---
+  it('backward compatibility: without bodyTemplate, falls back to flat mode', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const sender = new HttpEmailSender(makeConfig()); // 无 bodyTemplate
+    await sender.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    // 扁平模式：顶层标准字段
+    expect(body.from).toBe('sender@example.com');
+    expect(body.to).toBe('recipient@example.com');
+    expect(body.subject).toBe('Test Subject');
+    expect(body.text).toBe('Hello from test');
+  });
+
+  // --- 模板模式下 fieldMap/toAsArray/extraBody 被忽略 ---
+  it('template mode ignores flat-mode options (fieldMap, toAsArray, extraBody)', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      from: '{{from}}',
+      to: '{{to}}',
+      subject: '{{subject}}',
+      text: '{{text}}',
+    };
+    const sender = new HttpEmailSender(makeConfig({
+      bodyTemplate: template,
+      fieldMap: { from: 'renamed_from', to: 'renamed_to' },
+      toAsArray: true,
+      extraBody: { extra_key: 'extra_value' },
+    }));
+    await sender.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    // 模板模式：按模板 key 命名，扁平模式的 rename 不生效
+    expect(body.from).toBe('sender@example.com');
+    expect(body.to).toBe('recipient@example.com'); // 不应是数组
+    expect(Array.isArray(body.to)).toBe(false);
+    // extraBody 的 extra_key 不出现
+    expect(body).not.toHaveProperty('extra_key');
+    // renamed_from 不出现
+    expect(body).not.toHaveProperty('renamed_from');
+  });
+
+  // --- 复杂嵌套：多层对象 + 数组混合 ---
+  it('handles deeply nested template with arrays and objects', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      message: {
+        from: { email: '{{from}}' },
+        to: [{ email: '{{to}}' }],
+        content: {
+          subject: '{{subject}}',
+          text: '{{text}}',
+          html: '{{html}}',
+        },
+      },
+      sandbox: true,
+    };
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    await sender.send(sampleMessageWithHtml);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.message.from).toEqual({ email: 'sender@example.com' });
+    expect(body.message.to).toEqual([{ email: 'recipient@example.com' }]);
+    expect(body.message.content.subject).toBe('Test Subject');
+    expect(body.message.content.text).toBe('Hello from test');
+    expect(body.message.content.html).toBe('<p>Hello from test</p>');
+    expect(body.sandbox).toBe(true);
+  });
+
+  // --- 顶层为数组的合法模板正常工作 ---
+  it('array-root template: top-level array is traversed and placeholders replaced', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    // 某些 API 接受顶层数组 body
+    const template = [
+      { email: '{{from}}', role: 'sender' },
+      { email: '{{to}}',   role: 'recipient' },
+      { subject: '{{subject}}', text: '{{text}}' },
+    ];
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    await sender.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(Array.isArray(body)).toBe(true);
+    expect(body[0]).toEqual({ email: 'sender@example.com',    role: 'sender' });
+    expect(body[1]).toEqual({ email: 'recipient@example.com', role: 'recipient' });
+    expect(body[2]).toEqual({ subject: 'Test Subject', text: 'Hello from test' });
+  });
+
+  // --- 顶层数组：html undefined → {{html}} 元素被过滤 ---
+  it('array-root template: {{html}} element filtered out when html is undefined', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = ['{{text}}', '{{html}}'];
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    await sender.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toEqual(['Hello from test']);
+  });
+
+  // --- 复杂嵌套：html undefined 时内嵌 html 字段被删除 ---
+  it('removes deeply nested html key when html is undefined', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      message: {
+        from: { email: '{{from}}' },
+        to: [{ email: '{{to}}' }],
+        content: {
+          subject: '{{subject}}',
+          text: '{{text}}',
+          html: '{{html}}',
+        },
+      },
+    };
+    const sender = new HttpEmailSender(makeConfig({ bodyTemplate: template }));
+    await sender.send(sampleMessage); // sampleMessage 没有 html
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.message.content).not.toHaveProperty('html');
+    expect(body.message.content.text).toBe('Hello from test');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // CloudflareEmailSender
 // ---------------------------------------------------------------------------
 
@@ -737,5 +1026,72 @@ describe('buildEmailSenderFromEnv', () => {
 
   it('returns null for fully empty env', () => {
     expect(buildEmailSenderFromEnv({})).toBeNull();
+  });
+
+  // --- MFA_EMAIL_HTTP_BODY_TEMPLATE 模板模式 ---
+
+  it('picks up MFA_EMAIL_HTTP_BODY_TEMPLATE and uses template mode when valid JSON', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = {
+      from_address: '{{from}}',
+      recipient: '{{to}}',
+      subject_line: '{{subject}}',
+      body: '{{text}}',
+    };
+    const result = buildEmailSenderFromEnv({
+      MFA_EMAIL_FROM: 'sender@example.com',
+      MFA_EMAIL_HTTP_ENDPOINT: 'https://api.example.com/send',
+      MFA_EMAIL_HTTP_BODY_TEMPLATE: JSON.stringify(template),
+    });
+    expect(result).not.toBeNull();
+    await result!.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.from_address).toBe('sender@example.com');
+    expect(body.recipient).toBe('recipient@example.com');
+    expect(body.subject_line).toBe('Test Subject');
+    expect(body.body).toBe('Hello from test');
+  });
+
+  it('throws on invalid JSON in MFA_EMAIL_HTTP_BODY_TEMPLATE including variable name in error', () => {
+    expect(() => buildEmailSenderFromEnv({
+      MFA_EMAIL_FROM: 'sender@example.com',
+      MFA_EMAIL_HTTP_ENDPOINT: 'https://api.example.com/send',
+      MFA_EMAIL_HTTP_BODY_TEMPLATE: '{not valid json',
+    })).toThrow('MFA_EMAIL_HTTP_BODY_TEMPLATE: invalid JSON');
+  });
+
+  it('does not pick up MFA_EMAIL_HTTP_BODY_TEMPLATE when value is whitespace only', async () => {
+    // 空白仅值 → 等同未配置，走扁平模式
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const result = buildEmailSenderFromEnv({
+      MFA_EMAIL_FROM: 'sender@example.com',
+      MFA_EMAIL_HTTP_ENDPOINT: 'https://api.example.com/send',
+      MFA_EMAIL_HTTP_BODY_TEMPLATE: '   ',
+    });
+    expect(result).not.toBeNull();
+    await result!.send(sampleMessage);
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    // 扁平模式：顶层字段 from/to/subject/text
+    expect(body.from).toBe('sender@example.com');
+    expect(body.to).toBe('recipient@example.com');
+  });
+
+  it('accepts array-root MFA_EMAIL_HTTP_BODY_TEMPLATE (not treated as invalid JSON)', async () => {
+    // buildHttpConfig 放开后顶层数组应被接受，不再抛 invalid JSON
+    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    const template = [{ from: '{{from}}', to: '{{to}}', subject: '{{subject}}', text: '{{text}}' }];
+    const result = buildEmailSenderFromEnv({
+      MFA_EMAIL_FROM: 'sender@example.com',
+      MFA_EMAIL_HTTP_ENDPOINT: 'https://api.example.com/send',
+      MFA_EMAIL_HTTP_BODY_TEMPLATE: JSON.stringify(template),
+    });
+    expect(result).not.toBeNull();
+    await result!.send(sampleMessage);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(Array.isArray(body)).toBe(true);
+    expect(body[0].from).toBe('sender@example.com');
+    expect(body[0].to).toBe('recipient@example.com');
   });
 });

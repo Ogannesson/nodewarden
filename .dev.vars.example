@@ -38,5 +38,16 @@ JWT_SECRET=Enter-your-JWT-key-here-at-least-32-characters
 # Optional: set to "1" if the endpoint requires 'to' as an array instead of a string.
 # MFA_EMAIL_HTTP_TO_ARRAY=0
 #
+# Optional: JSON body template for APIs that require nested request structures.
+# When set, the flat-mode fields above (MFA_EMAIL_HTTP_BODY / MFA_EMAIL_HTTP_TO_ARRAY
+# and the default field names) are ignored; the template drives the entire body.
+# Supported placeholders (whole-value only — "Hi {{to}}" is not interpolated):
+#   "{{from}}"    → sender address   "{{to}}"   → recipient address
+#   "{{subject}}" → email subject    "{{text}}"  → plain-text body
+#   "{{html}}"    → HTML body (key is omitted entirely when no HTML is supplied)
+#
+# Nested structure API example:
+# MFA_EMAIL_HTTP_BODY_TEMPLATE={"from":{"email":"{{from}}"},"recipients":[{"email":"{{to}}"}],"text_content":"{{text}}","html_content":"{{html}}"}
+#
 # Local testing mock (returns 2xx, no real email sent):
 # MFA_EMAIL_HTTP_ENDPOINT=http://localhost:9876/send

@@ -36,6 +36,10 @@ export interface Env {
   MFA_EMAIL_HTTP_BODY?: string;
   // Set to "1", "true", or "yes" to send the 'to' field as an array (some APIs require this).
   MFA_EMAIL_HTTP_TO_ARRAY?: string;
+  // JSON body template for APIs with nested structures (e.g. from:{email:"{{from}}"}).
+  // When set, the flat-mode fields (MFA_EMAIL_HTTP_BODY / MFA_EMAIL_HTTP_TO_ARRAY / fieldMap)
+  // are ignored and the template drives the entire request body.
+  MFA_EMAIL_HTTP_BODY_TEMPLATE?: string;
 }
 
 export type UserRole = 'admin' | 'user';
