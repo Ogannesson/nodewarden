@@ -1175,6 +1175,8 @@ const ru: Record<string, string> = {
   "txt_mfa_last_method_msg": "Это ваш последний активный метод аутентификации. После отключения учётная запись не будет требовать двухэтапной аутентификации. Продолжить?",
   "txt_email_mfa": "Аутентификация по email",
   "txt_email_mfa_enabled": "Двухфакторная аутентификация по email активна",
+  "txt_email_mfa_how_it_works_desc": "При каждом входе на зарегистрированный email отправляется 6-значный код; код действителен 10 минут.",
+  "txt_email_mfa_enrolled_addr": "Зарегистрированный email",
   "txt_email_mfa_disable": "Отключить аутентификацию по email",
   "txt_email_mfa_disable_title": "Отключить аутентификацию по email",
   "txt_email_mfa_disable_msg": "Введите мастер-пароль для отключения двухфакторной аутентификации по email.",

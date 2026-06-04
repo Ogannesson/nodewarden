@@ -1080,15 +1080,15 @@ export async function performWebAuthnAssertion(
  * Returns whether email 2FA is enabled for the current user.
  * Throws on non-2xx (caller must handle errors explicitly).
  */
-export async function getEmailTwoFactorStatus(authedFetch: AuthedFetch): Promise<{ enabled: boolean; available: boolean; configured: boolean }> {
+export async function getEmailTwoFactorStatus(authedFetch: AuthedFetch): Promise<{ enabled: boolean; available: boolean; configured: boolean; email?: string | null }> {
   const resp = await authedFetch('/api/two-factor/email', { method: 'GET' });
   if (!resp.ok) {
     const body = await parseJson<TokenError>(resp);
     throw new Error(translateServerError(body?.error_description || body?.error, t('txt_email_mfa_load_failed')));
   }
-  const result = (await parseJson<{ enabled?: boolean; available?: boolean; configured?: boolean }>(resp)) || {};
+  const result = (await parseJson<{ enabled?: boolean; available?: boolean; configured?: boolean; email?: string | null }>(resp)) || {};
   // available is explicitly returned by the server (true only when an email channel — Cloudflare binding or custom HTTP — is configured)
-  return { enabled: !!result.enabled, available: !!result.available, configured: !!result.configured };
+  return { enabled: !!result.enabled, available: !!result.available, configured: !!result.configured, email: result.email ?? null };
 }
 
 /**

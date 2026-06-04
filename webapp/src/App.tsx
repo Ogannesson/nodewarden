@@ -1753,6 +1753,7 @@ export default function App() {
     emailTwoFactorEnabled: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data ? undefined : emailTwoFactorQuery.data?.enabled,
     emailTwoFactorConfigured: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data ? undefined : emailTwoFactorQuery.data?.configured,
     emailTwoFactorAvailable: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data ? undefined : emailTwoFactorQuery.data?.available,
+    emailTwoFactorEnrolledEmail: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data ? undefined : emailTwoFactorQuery.data?.email ?? null,
     emailTwoFactorQueryError: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data,
     onDisableEmailTwoFactor: accountSecurityActions.disableEmailTwoFactor,
     onReEnableEmailTwoFactor: async (masterPassword: string) => {

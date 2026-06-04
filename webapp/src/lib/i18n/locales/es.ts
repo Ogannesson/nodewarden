@@ -1175,6 +1175,8 @@ const es: Record<string, string> = {
   "txt_mfa_last_method_msg": "Este es su último método activo. Al deshabilitarlo, su cuenta ya no requerirá la verificación en dos pasos. ¿Continuar?",
   "txt_email_mfa": "Verificación por correo electrónico",
   "txt_email_mfa_enabled": "La 2FA por correo electrónico está activa",
+  "txt_email_mfa_how_it_works_desc": "Se envía un código de 6 dígitos al correo registrado en cada inicio de sesión; los códigos expiran en 10 minutos.",
+  "txt_email_mfa_enrolled_addr": "Correo registrado",
   "txt_email_mfa_disable": "Deshabilitar verificación por correo",
   "txt_email_mfa_disable_title": "Deshabilitar verificación por correo electrónico",
   "txt_email_mfa_disable_msg": "Ingrese su contraseña maestra para deshabilitar la verificación en dos pasos por correo.",

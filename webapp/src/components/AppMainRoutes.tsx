@@ -135,6 +135,7 @@ export interface AppMainRoutesProps {
   emailTwoFactorEnabled?: boolean;
   emailTwoFactorConfigured?: boolean;
   emailTwoFactorAvailable?: boolean;
+  emailTwoFactorEnrolledEmail?: string | null;
   onDisableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
   onReEnableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
   onSendEmailSetupCode?: (email: string, masterPassword: string) => Promise<void>;
@@ -295,6 +296,7 @@ export default function AppMainRoutes(props: AppMainRoutesProps) {
                 emailTwoFactorEnabled={props.emailTwoFactorEnabled}
                 emailTwoFactorConfigured={props.emailTwoFactorConfigured}
                 emailTwoFactorAvailable={props.emailTwoFactorAvailable}
+                emailTwoFactorEnrolledEmail={props.emailTwoFactorEnrolledEmail}
                 onDisableEmailTwoFactor={props.onDisableEmailTwoFactor}
                 onReEnableEmailTwoFactor={props.onReEnableEmailTwoFactor}
                 onSendEmailSetupCode={props.onSendEmailSetupCode}

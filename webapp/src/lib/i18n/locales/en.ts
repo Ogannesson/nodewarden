@@ -1175,6 +1175,8 @@ const en: Record<string, string> = {
   "txt_mfa_last_method_msg": "This is your last active method. Disabling it will remove two-step verification from your account. Continue?",
   "txt_email_mfa": "Email Verification",
   "txt_email_mfa_enabled": "Email 2FA is active",
+  "txt_email_mfa_how_it_works_desc": "A 6-digit code is sent to your enrolled email at each sign-in; codes expire after 10 minutes.",
+  "txt_email_mfa_enrolled_addr": "Enrolled email",
   "txt_email_mfa_disable": "Disable Email Verification",
   "txt_email_mfa_disable_title": "Disable Email Verification",
   "txt_email_mfa_disable_msg": "Enter your master password to disable email two-factor authentication.",

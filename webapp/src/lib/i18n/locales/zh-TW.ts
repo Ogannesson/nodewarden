@@ -1175,6 +1175,8 @@ const zhTW: Record<string, string> = {
   "txt_mfa_last_method_msg": "這是您最後一個啟用的驗證方式。停用後帳戶將不再要求兩步驟驗證。確定繼續？",
   "txt_email_mfa": "電子郵件驗證",
   "txt_email_mfa_enabled": "電子郵件兩步驟驗證已啟用",
+  "txt_email_mfa_how_it_works_desc": "每次登入時向已綁定的電子郵件傳送 6 位數驗證碼，驗證碼 10 分鐘內有效。",
+  "txt_email_mfa_enrolled_addr": "綁定電子郵件",
   "txt_email_mfa_disable": "停用電子郵件驗證",
   "txt_email_mfa_disable_title": "停用電子郵件驗證",
   "txt_email_mfa_disable_msg": "請輸入主密碼以停用電子郵件兩步驟驗證。",

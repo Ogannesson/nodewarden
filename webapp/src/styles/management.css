@@ -1927,3 +1927,72 @@
     @apply flex-wrap;
   }
 }
+
+/* ── MFA cards grid (2FA section only) ── */
+
+.mfa-cards-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  /* span full row of parent settings-modules-grid so internal 2-col layout has full width */
+  grid-column: 1 / -1;
+}
+
+/* ── MFA method enabled note — disabled modifier ── */
+
+.mfa-method-enabled-note--disabled {
+  opacity: 0.7;
+}
+
+/* ── WebAuthn keys list / add section separator ── */
+
+.webauthn-keys-list + .webauthn-add-section {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 0.75rem;
+  margin-top: 0.25rem;
+}
+
+/* ── Email MFA info block (enrolled address + description) ── */
+
+.email-mfa-info-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.email-mfa-enrolled-addr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.email-mfa-enrolled-addr svg {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.email-mfa-enrolled-label {
+  color: var(--muted);
+  font-weight: 400;
+  flex-shrink: 0;
+}
+
+.email-mfa-enrolled-value {
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.email-mfa-info-desc {
+  font-size: 13px;
+  color: var(--muted);
+}

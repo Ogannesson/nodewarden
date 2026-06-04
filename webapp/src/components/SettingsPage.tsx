@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
-import { Bluetooth, Clipboard, FingerprintPattern, KeyRound, Pencil, Radio, RefreshCw, ShieldCheck, ShieldOff, Trash2, Usb } from 'lucide-preact';
+import { Bluetooth, Clipboard, FingerprintPattern, KeyRound, Mail, Pencil, Radio, RefreshCw, ShieldCheck, ShieldOff, Trash2, Usb } from 'lucide-preact';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import qrcode from 'qrcode-generator';
 import type { Profile } from '@/lib/types';
@@ -40,6 +40,8 @@ interface SettingsPageProps {
   /** True if email enrollment row exists (even if disabled). Allows re-enable without re-setup. */
   emailTwoFactorConfigured?: boolean;
   emailTwoFactorAvailable?: boolean;
+  /** Masked enrolled email address returned by GET /api/two-factor/email (e.g. t***@example.com). */
+  emailTwoFactorEnrolledEmail?: string | null;
   onDisableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
   /** Re-enable email 2FA using only master password (no re-enrollment needed). */
   onReEnableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
@@ -536,6 +538,9 @@ export default function SettingsPage(props: SettingsPageProps) {
         </div>
       </section>
 
+      {/* 2FA cards grid — align-items:start so cards don't stretch to each other's height */}
+      <div className="mfa-cards-grid">
+
       {/* TOTP section */}
       <section className="card settings-module">
         <div className="settings-module-head">
@@ -567,7 +572,7 @@ export default function SettingsPage(props: SettingsPageProps) {
           </div>
         )}
         {!totpLocked && props.totpConfigured && (
-          <div className="mfa-method-enabled-note" style={{ opacity: 0.7 }}>
+          <div className="mfa-method-enabled-note mfa-method-enabled-note--disabled">
             <ShieldOff size={14} aria-hidden="true" />
             {t('txt_totp_configured_but_disabled')}
           </div>
@@ -815,10 +820,27 @@ export default function SettingsPage(props: SettingsPageProps) {
               {t('txt_email_mfa_enabled')}
             </div>
           )}
+          {props.emailTwoFactorEnabled && emailSetupStep === 'idle' && (
+            <div className="email-mfa-info-block">
+              {props.emailTwoFactorEnrolledEmail && (
+                <div className="email-mfa-enrolled-addr">
+                  <Mail size={13} aria-hidden="true" />
+                  <span className="email-mfa-enrolled-label">{t('txt_email_mfa_enrolled_addr')}</span>
+                  <span className="email-mfa-enrolled-value">{props.emailTwoFactorEnrolledEmail}</span>
+                </div>
+              )}
+              <div className="email-mfa-info-desc">{t('txt_email_mfa_how_it_works_desc')}</div>
+            </div>
+          )}
           {!props.emailTwoFactorEnabled && props.emailTwoFactorConfigured && (
-            <div className="mfa-method-enabled-note" style={{ opacity: 0.7 }}>
+            <div className="mfa-method-enabled-note mfa-method-enabled-note--disabled">
               <ShieldOff size={14} aria-hidden="true" />
               {t('txt_email_mfa_configured_but_disabled')}
+            </div>
+          )}
+          {!props.emailTwoFactorEnabled && !props.emailTwoFactorConfigured && props.emailTwoFactorAvailable && emailSetupStep === 'idle' && (
+            <div className="email-mfa-info-block">
+              <div className="email-mfa-info-desc">{t('txt_email_mfa_how_it_works_desc')}</div>
             </div>
           )}
           {/* Step 1: request setup code */}
@@ -945,6 +967,8 @@ export default function SettingsPage(props: SettingsPageProps) {
           )}
         </section>
       )}
+
+      </div>{/* end mfa-cards-grid */}
 
       <section className="settings-module sensitive-actions-module">
         <div className="sensitive-actions-grid">

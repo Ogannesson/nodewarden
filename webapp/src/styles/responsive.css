@@ -645,6 +645,7 @@
   }
 
   .settings-modules-grid,
+  .mfa-cards-grid,
   .domain-rules-grid,
   .password-settings-grid {
     grid-template-columns: 1fr;

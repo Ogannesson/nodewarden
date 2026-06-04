@@ -1175,6 +1175,8 @@ const zhCN: Record<string, string> = {
   "txt_mfa_last_method_msg": "这是您最后一个启用的验证方式。禁用后账户将不再要求两步验证。确定继续？",
   "txt_email_mfa": "邮件验证",
   "txt_email_mfa_enabled": "邮件两步验证已启用",
+  "txt_email_mfa_how_it_works_desc": "登录时向绑定邮箱发送 6 位验证码，验证码 10 分钟内有效。",
+  "txt_email_mfa_enrolled_addr": "绑定邮箱",
   "txt_email_mfa_disable": "禁用邮件验证",
   "txt_email_mfa_disable_title": "禁用邮件验证",
   "txt_email_mfa_disable_msg": "请输入主密码以禁用邮件两步验证。",
