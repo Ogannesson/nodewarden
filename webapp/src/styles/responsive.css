@@ -645,10 +645,13 @@
   }
 
   .settings-modules-grid,
-  .mfa-cards-grid,
   .domain-rules-grid,
   .password-settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  .settings-modules-grid--masonry {
+    columns: 1;
   }
 
   .import-export-panel .actions .btn,
@@ -846,9 +849,6 @@
     border-radius: 14px;
   }
 
-  .sensitive-actions-module {
-    padding: 0;
-  }
 
   .settings-module h3 {
     margin-bottom: 8px;
@@ -936,20 +936,6 @@
   .settings-module .totp-qr img {
     width: 118px;
     height: 118px;
-  }
-
-  .settings-module .sensitive-actions-grid {
-    gap: 8px;
-  }
-
-  .settings-module .sensitive-action {
-    padding: 23px .875rem;
-    border-radius: .5rem;
-  }
-
-  .settings-module .sensitive-action h4 {
-    margin-bottom: 4px;
-    font-size: 14px;
   }
 
   .settings-field-note {

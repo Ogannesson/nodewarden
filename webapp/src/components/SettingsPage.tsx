@@ -422,7 +422,7 @@ export default function SettingsPage(props: SettingsPageProps) {
   }
 
   return (
-    <div className="settings-modules-grid">
+    <div className="settings-modules-grid settings-modules-grid--masonry">
       <section className="card settings-module">
         <h3>{t('txt_session_timeout')}</h3>
         <div className="session-timeout-fields">
@@ -537,12 +537,6 @@ export default function SettingsPage(props: SettingsPageProps) {
           </span>
         </div>
       </section>
-
-      {/* 2FA cards grid — align-items:start so cards don't stretch to each other's height */}
-      <div className="mfa-cards-grid">
-
-      {/* Left column: TOTP + Email */}
-      <div className="mfa-col">
 
       {/* TOTP section */}
       <section className="card settings-module">
@@ -821,11 +815,6 @@ export default function SettingsPage(props: SettingsPageProps) {
         </section>
       )}
 
-      </div>{/* end mfa-col left */}
-
-      {/* Right column: Security Keys (WebAuthn) */}
-      <div className="mfa-col">
-
       {/* Security Keys (WebAuthn) section */}
       <section className="card settings-module">
         <div className="settings-module-head">
@@ -976,63 +965,51 @@ export default function SettingsPage(props: SettingsPageProps) {
         )}
       </section>
 
-      </div>{/* end mfa-col right */}
-
-      </div>{/* end mfa-cards-grid */}
-
-      <section className="settings-module sensitive-actions-module">
-        <div className="sensitive-actions-grid">
-          <div className="sensitive-action">
-            <div>
-              <h4>{t('txt_recovery_code')}</h4>
-              <p className="muted-inline settings-field-note">
-                {t('txt_this_is_a_one_time_code_after_it_is_used_a_new_code_is_generated_automatically')}
-              </p>
-            </div>
-            <div className="actions">
-              <button type="button" className="btn btn-secondary" onClick={() => openMasterPasswordPrompt('recovery')}>
-                <ShieldCheck size={14} className="btn-icon" />
-                {t('txt_view_recovery_code')}
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                disabled={!recoveryCode}
-                onClick={() => {
-                  void copyTextToClipboard(recoveryCode, { successMessage: t('txt_recovery_code_copied') });
-                }}
-              >
-                <Clipboard size={14} className="btn-icon" />
-                {t('txt_copy_code')}
-              </button>
-            </div>
-            {recoveryCode && (
-              <div className="recovery-code-card">
-                <div className="recovery-code-value">{recoveryCode}</div>
-              </div>
-            )}
+      <section className="card settings-module">
+        <h3>{t('txt_recovery_code')}</h3>
+        <p className="muted-inline settings-field-note">
+          {t('txt_this_is_a_one_time_code_after_it_is_used_a_new_code_is_generated_automatically')}
+        </p>
+        <div className="actions">
+          <button type="button" className="btn btn-secondary" onClick={() => openMasterPasswordPrompt('recovery')}>
+            <ShieldCheck size={14} className="btn-icon" />
+            {t('txt_view_recovery_code')}
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={!recoveryCode}
+            onClick={() => {
+              void copyTextToClipboard(recoveryCode, { successMessage: t('txt_recovery_code_copied') });
+            }}
+          >
+            <Clipboard size={14} className="btn-icon" />
+            {t('txt_copy_code')}
+          </button>
+        </div>
+        {recoveryCode && (
+          <div className="recovery-code-card">
+            <div className="recovery-code-value">{recoveryCode}</div>
           </div>
+        )}
+      </section>
 
-          <div className="sensitive-action">
-            <div>
-              <h4>{t('txt_api_key')}</h4>
-              <p className="muted-inline settings-field-note">{t('txt_api_key_dialog_intro')}</p>
-            </div>
-            <div className="actions">
-              <button type="button" className="btn btn-secondary" onClick={() => openMasterPasswordPrompt('apiKey')}>
-                <KeyRound size={14} className="btn-icon" />
-                {t('txt_view_api_key')}
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => setRotateApiKeyConfirmOpen(true)}
-              >
-                <RefreshCw size={14} className="btn-icon" />
-                {t('txt_rotate_api_key')}
-              </button>
-            </div>
-          </div>
+      <section className="card settings-module">
+        <h3>{t('txt_api_key')}</h3>
+        <p className="muted-inline settings-field-note">{t('txt_api_key_dialog_intro')}</p>
+        <div className="actions">
+          <button type="button" className="btn btn-secondary" onClick={() => openMasterPasswordPrompt('apiKey')}>
+            <KeyRound size={14} className="btn-icon" />
+            {t('txt_view_api_key')}
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => setRotateApiKeyConfirmOpen(true)}
+          >
+            <RefreshCw size={14} className="btn-icon" />
+            {t('txt_rotate_api_key')}
+          </button>
         </div>
       </section>
       <ConfirmDialog

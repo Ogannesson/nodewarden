@@ -503,6 +503,23 @@
   grid-template-columns: repeat(2, minmax(0, calc((100% - var(--settings-grid-gap)) / 2)));
 }
 
+/* masonry modifier — SettingsPage 专用；不影响 DomainRulesPage 等使用裸 class 的页面 */
+.settings-modules-grid--masonry {
+  display: block; /* 覆盖 @apply grid 的 display:grid，columns 才能生效 */
+  columns: 2;
+  column-gap: var(--settings-grid-gap);
+}
+
+.settings-modules-grid--masonry > .settings-module,
+.settings-modules-grid--masonry > .card {
+  break-inside: avoid;
+  margin-bottom: var(--settings-grid-gap);
+}
+
+.settings-modules-grid--masonry > :last-child {
+  margin-bottom: 0;
+}
+
 .log-center-page {
   @apply grid h-full min-h-0 gap-3;
   height: 100%;
@@ -1035,13 +1052,6 @@
   width: 100%;
 }
 
-.sensitive-actions-module {
-  @apply min-w-0 p-0;
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-}
-
 .settings-module h3 {
   @apply mb-4 mt-0 text-base font-extrabold;
   color: var(--text);
@@ -1078,24 +1088,6 @@
 
 .session-timeout-fields {
   @apply grid gap-3;
-}
-
-.sensitive-actions-grid {
-  @apply grid gap-[3px];
-}
-
-.sensitive-action {
-  @apply border;
-  border-radius: .5rem;
-  border-width: 1px;
-  padding: 23px .875rem;
-  border-color: var(--line);
-  background: var(--panel);
-}
-
-.sensitive-action h4 {
-  @apply mb-1 mt-0 text-base font-extrabold;
-  color: var(--text);
 }
 
 .recovery-code-card {
@@ -1926,24 +1918,6 @@
   .webauthn-key-actions {
     @apply flex-wrap;
   }
-}
-
-/* ── MFA cards grid (2FA section only) ── */
-
-.mfa-cards-grid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
-  /* span full row of parent settings-modules-grid so internal 2-col layout has full width */
-  grid-column: 1 / -1;
-}
-
-.mfa-col {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
 }
 
 /* ── MFA method enabled note — disabled modifier ── */
