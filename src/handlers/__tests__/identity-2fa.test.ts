@@ -417,14 +417,14 @@ describe('handleToken (password grant) – 恢复码（provider -1 / 8 / 100）'
     const resp = await handleToken(req, fakeEnv as unknown as typeof fakeEnv & { DB: D1Database });
 
     expect(resp.status).toBe(200);
-    // 用恢复码后应调用 saveUser（禁用 TOTP + 轮换恢复码）
+    // 用恢复码后应调用 saveUser（禁用 TOTP + 清除恢复码）
     expect(mockStorage.saveUser).toHaveBeenCalled();
     // 必修加固 #2：saveUser 时 totpSecret 必须已被清为 null（TOTP 真正被禁用）
     const savedUser = (mockStorage.saveUser.mock.calls as unknown as Array<[import('../../types').User]>)[0][0];
     expect(savedUser.totpSecret).toBeNull();
-    // 恢复码必须被轮换（不再等于原始值）
-    expect(savedUser.totpRecoveryCode).not.toBe(RECOVERY_CODE);
-    expect(savedUser.totpRecoveryCode).not.toBeNull();
+    // 恢复码必须被清除为 null：token 端点无法把新明文码回传给客户端，清除可让用户
+    // 登录后经专用 recovery-code endpoint 重新生成可显示的新码（避免轮换成不可知 hash）。
+    expect(savedUser.totpRecoveryCode).toBeNull();
     // P1 加固：恢复码是账户级逃生门，必须同时清除 two_factors 表所有 provider 行
     expect(mockStorage.deleteAllTwoFactorsByUserId).toHaveBeenCalledWith(user.id);
     // 应撤销现有 refresh tokens

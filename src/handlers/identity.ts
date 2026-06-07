@@ -6,7 +6,7 @@ import { jsonResponse, errorResponse, identityErrorResponse } from '../utils/res
 import { LIMITS } from '../config/limits';
 import { createRefreshToken } from '../utils/jwt';
 import { readAuthRequestDeviceInfo } from '../utils/device';
-import { createRecoveryCode, hashRecoveryCode, recoveryCodeEquals } from '../utils/recovery-code';
+import { recoveryCodeEquals } from '../utils/recovery-code';
 import { generateUUID } from '../utils/uuid';
 import { issueSendAccessToken } from './sends';
 import {
@@ -408,9 +408,12 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
         }
         // Disable TOTP (legacy column).
         user.totpSecret = null;
-        // Rotate recovery code immediately (one-time use). New code is hashed before
-        // storage via hashRecoveryCode inside saveUser path (set on user object).
-        user.totpRecoveryCode = await hashRecoveryCode(createRecoveryCode());
+        // Clear the recovery code rather than rotating it: the token endpoint has no
+        // field to return a fresh plaintext code to the client, so rotating to a new
+        // hash here would leave the user with a permanently unknowable recovery code.
+        // Setting null lets them generate a fresh, displayable one via the dedicated
+        // recovery-code endpoint after they re-enable 2FA.
+        user.totpRecoveryCode = null;
         user.updatedAt = new Date().toISOString();
         await storage.saveUser(user);
         // Disable all non-TOTP 2FA providers stored in two_factors table.

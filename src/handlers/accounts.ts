@@ -651,8 +651,10 @@ export async function handleSetTotpStatus(request: Request, env: Env, userId: st
       if (!hasToken) {
         return errorResponse('TOTP token is required', 400);
       }
-      const verified = await verifyTotpToken(normalizedSecret, body.token!);
-      if (!verified) {
+      // verifyTotpToken returns the matched counter (number) or null — compare to null
+      // explicitly rather than relying on falsiness (the counter contract is numeric).
+      const matchedCounter = await verifyTotpToken(normalizedSecret, body.token!);
+      if (matchedCounter === null) {
         return errorResponse('Invalid TOTP token', 400);
       }
       user.totpSecret = normalizedSecret;
