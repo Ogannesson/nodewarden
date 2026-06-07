@@ -11,6 +11,7 @@ export interface CfEmailBinding {
 export interface Env {
   DB: D1Database;
   NOTIFICATIONS_HUB: DurableObjectNamespace;
+  BACKUP_TRANSFER_RUNNER: DurableObjectNamespace;
   ASSETS?: {
     fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   };
