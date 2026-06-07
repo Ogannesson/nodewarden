@@ -5,7 +5,7 @@
  *
  * Security implementation follows docs/MFA-SECURITY-CHECKLIST.md §3:
  * - 6-digit numeric code, 600-second TTL, max 3 attempts before token invalidation.
- * - Constant-time comparison (via HMAC-based timingSafeEqual).
+ * - Constant-time comparison (via XOR-accumulation timingSafeEqual).
  * - Send failures are thrown (never swallowed).
  * - Anti-enumeration: send-email-login always returns 200 regardless of user existence.
  * - Rate limiting delegated to the caller (RateLimitService.recordFailedLogin).

@@ -67,7 +67,7 @@ vi.mock('../../services/auth', () => ({
 
 vi.mock('../../services/two-factor/email-provider', () => ({
   EMAIL_ENROLLMENT_ATYPE: 1,
-  EMAIL_LOGIN_CHALLENGE_ATYPE: 1001,
+  EMAIL_LOGIN_CHALLENGE_ATYPE: 1002,
   generateNumericCode: vi.fn(() => '123456'),
   maskEmail: vi.fn((e: string) => e),
   CODE_TTL_S: 600,

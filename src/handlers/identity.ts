@@ -20,6 +20,7 @@ import type { TwoFactorProvider } from '../services/two-factor/types';
 import {
   getTwoFactor,
   upsertTwoFactor,
+  deleteTwoFactor,
 } from '../services/storage-two-factor-repo';
 import {
   EMAIL_ENROLLMENT_ATYPE,
@@ -991,7 +992,9 @@ export async function handleSendEmailLogin(request: Request, env: Env): Promise<
       ].join('\n'),
     });
   } catch (err) {
-    // Explicit failure — never swallow.
+    // Send failed: remove the challenge row we just persisted so no stale (unsent)
+    // code is left behind to confuse retries. Explicit failure — never swallow.
+    await deleteTwoFactor(env.DB, user.id, EMAIL_LOGIN_CHALLENGE_ATYPE);
     return new Response(
       JSON.stringify({ Message: `Failed to send verification email: ${err instanceof Error ? err.message : String(err)}` }),
       { status: 500, headers: { 'Content-Type': 'application/json' } }

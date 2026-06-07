@@ -433,6 +433,10 @@ describe('handleSendEmailLogin', () => {
     expect(resp.status).toBe(500);
     const body = await resp.json() as { Message: string };
     expect(body.Message).toMatch(/Failed to send/);
+    // Regression guard: the challenge row written before the send must be removed on
+    // failure, so no stale (unsent) code is left behind to confuse retries.
+    expect(mockUpsertTwoFactor).toHaveBeenCalledOnce(); // challenge was persisted...
+    expect(mockDeleteTwoFactor).toHaveBeenCalledOnce(); // ...then cleaned up on send failure
   });
 });
 
