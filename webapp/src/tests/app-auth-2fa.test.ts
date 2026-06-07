@@ -213,6 +213,24 @@ describe('performPasswordLogin – WebAuthn 挑战识别', () => {
     // 没有 providers2['7'] 数据 → 无法构造 WebAuthn 挑战 → fallback 到 totp
     expect(result.kind).toBe('totp');
   });
+
+  it('Email 2FA 挑战含大写 Email key → maskedEmail 取脱敏值（不 fallback 到完整邮箱）', async () => {
+    // 回归守卫：服务端返回 TwoFactorProviders2["1"] = { Email: "u***@e***.com" }（大写 E，
+    // Bitwarden 兼容）。前端必须读到脱敏值，而不是因读 p1['email']（小写）落空、
+    // fallback 成用户输入的完整邮箱（泄露/UX bug）。
+    (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue({
+      TwoFactorProviders: ['1'],
+      TwoFactorProviders2: { '1': { Email: 'u***@e***.com' } },
+      error: 'invalid_grant',
+    });
+
+    const result = await performPasswordLogin('user@example.com', 'password', 600000);
+
+    expect(result.kind).toBe('email');
+    if (result.kind === 'email') {
+      expect(result.pendingEmail.maskedEmail).toBe('u***@e***.com');
+    }
+  });
 });
 
 // -----------------------------------------------------------------------

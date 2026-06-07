@@ -63,24 +63,21 @@ export function parseClientDataJSON(base64Url: string): ParsedClientData | null 
 // Constant-time buffer comparison (Workers has no crypto.timingSafeEqual)
 // ---------------------------------------------------------------------------
 
-/** Constant-time equality using HMAC-SHA-256. Returns false on length mismatch. */
+/**
+ * Constant-time equality. Returns false on length mismatch.
+ *
+ * Uses an XOR-accumulation loop (same pattern as utils/totp.ts): every byte is
+ * compared and the per-byte differences OR-ed together, so the running time
+ * depends only on the (equal) length, never on where a mismatch first occurs.
+ * This avoids the per-call generateKey + 4× HMAC WebCrypto operations the previous
+ * implementation paid on every comparison — it sits on the Email-OTP / recovery
+ * verification hot path. Kept async so existing `await` call sites are unchanged.
+ */
 export async function timingSafeEqual(a: Uint8Array, b: Uint8Array): Promise<boolean> {
   if (a.length !== b.length) return false;
-  // Use a random ephemeral key — the HMAC output is opaque and equal length,
-  // so comparing the two MACs leaks no information about the inputs.
-  // generateKey with usages ['sign','verify'] always returns a CryptoKey (not CryptoKeyPair).
-  const key = (await crypto.subtle.generateKey(
-    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']
-  )) as CryptoKey;
-  const [sigA, sigB] = await Promise.all([
-    crypto.subtle.sign('HMAC', key, a),
-    crypto.subtle.sign('HMAC', key, b),
-  ]);
-  // crypto.subtle.verify does a MAC comparison; both sides have the same key,
-  // so verify(key, sig, data) ≡ MAC(key, data) === sig in constant time.
-  const aOk = await crypto.subtle.verify('HMAC', key, sigA, b);
-  const bOk = await crypto.subtle.verify('HMAC', key, sigB, a);
-  return aOk && bOk;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 
 /** Plain byte-level equality (not timing-safe — only use for non-secret data). */

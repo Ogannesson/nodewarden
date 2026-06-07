@@ -32,7 +32,7 @@ import type {
   VerifyContext,
 } from './types';
 import { TwoFactorType } from './types';
-import { buildEmailSenderFromEnv, isEmailSenderConfigured } from '../email-sender';
+import { isEmailSenderConfigured } from '../email-sender';
 import { timingSafeEqual } from '../../utils/passkey';
 import { safeWriteAuditEvent } from '../audit-events';
 
@@ -127,68 +127,26 @@ class EmailTwoFactorProvider implements TwoFactorProvider {
   }
 
   /**
-   * Build the login challenge: generate + store a code, send it, return masked email.
+   * Announce the Email provider for the login challenge: TwoFactorProviders2["1"].
+   *
+   * IMPORTANT: this returns ONLY the masked destination — it does not generate,
+   * store, or send a code. Code delivery is owned solely by the send-email-login
+   * endpoint (handleSendEmailLogin), which the web client calls during the
+   * challenge. (Bug fix: this method used to also generate + send a code, so every
+   * login produced two emails and the first code was immediately overwritten by the
+   * client-triggered send and thus invalid.)
+   *
    * TwoFactorProviders2["1"] = { "Email": "u***@example.com" }
    */
   async buildChallenge(ctx: ChallengeContext): Promise<unknown> {
-    const { user, env, db, twoFactorRows } = ctx;
+    const { twoFactorRows } = ctx;
 
-    // Find enrollment row.
     const enrollmentRow = twoFactorRows.find(r => r.atype === EMAIL_ENROLLMENT_ATYPE && r.enabled);
     if (!enrollmentRow) {
       throw new Error('Email 2FA not enrolled for this user');
     }
     const enrollment = JSON.parse(enrollmentRow.data) as EmailEnrollmentData;
-    const targetEmail = enrollment.email;
-
-    // Generate code and store challenge (upsert — one active challenge per user).
-    const code = generateNumericCode();
-    const challenge: EmailChallenge = {
-      code,
-      createdAt: Date.now(),
-      attempts: 0,
-    };
-    await upsertTwoFactor(db, {
-      userId: user.id,
-      atype: EMAIL_LOGIN_CHALLENGE_ATYPE,
-      enabled: true,
-      data: JSON.stringify(challenge),
-      lastUsed: null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-
-    // Send the code — failure MUST throw (no silent swallowing).
-    const sender = buildEmailSenderFromEnv(env);
-    if (!sender) {
-      throw new Error('Email sender not configured (MFA_EMAIL_FROM / email backend missing)');
-    }
-    await sender.send({
-      to: targetEmail,
-      subject: 'Your NodeWarden verification code',
-      text: [
-        `Your NodeWarden verification code is: ${code}`,
-        '',
-        `This code expires in ${CODE_TTL_S / 60} minutes and can only be used once.`,
-        'If you did not request this code, please secure your account immediately.',
-      ].join('\n'),
-      html: [
-        `<p>Your NodeWarden verification code is: <strong>${code}</strong></p>`,
-        `<p>This code expires in ${CODE_TTL_S / 60} minutes and can only be used once.</p>`,
-        '<p>If you did not request this code, please secure your account immediately.</p>',
-      ].join(''),
-    });
-
-    await safeWriteAuditEvent(env, {
-      actorUserId: user.id,
-      action: 'account.email2fa.code_sent',
-      category: 'security',
-      level: 'info',
-      targetType: 'user',
-      targetId: user.id,
-    });
-
-    return { Email: maskEmail(targetEmail) };
+    return { Email: maskEmail(enrollment.email) };
   }
 
   /**

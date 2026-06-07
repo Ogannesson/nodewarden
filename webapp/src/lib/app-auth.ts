@@ -388,7 +388,10 @@ export async function performPasswordLogin(
     // Email 2FA (provider 1) — only triggered when no WebAuthn is available.
     if (providerKeys.includes('1') && !providerKeys.includes('0')) {
       const p1 = providers2['1'] as Record<string, unknown> | null | undefined;
-      const maskedEmail = typeof p1?.['email'] === 'string' ? p1['email'] : normalizedEmail;
+      // Server returns TwoFactorProviders2["1"] = { Email: "u***@e***.com" } (capital E,
+      // Bitwarden-compatible). Accept both casings defensively so the masked address shows.
+      const maskedEmail = (typeof p1?.['Email'] === 'string' ? p1['Email']
+        : typeof p1?.['email'] === 'string' ? p1['email'] : null) ?? normalizedEmail;
       // Trigger the server to send the email OTP immediately.
       await sendEmailLoginCode(normalizedEmail, derived.hash);
       return {
@@ -563,7 +566,10 @@ export async function performUnlock(
     // Email 2FA (provider 1) — only triggered when no WebAuthn is available.
     if (providerKeys.includes('1') && !providerKeys.includes('0')) {
       const p1 = providers2['1'] as Record<string, unknown> | null | undefined;
-      const maskedEmail = typeof p1?.['email'] === 'string' ? p1['email'] : normalizedEmail;
+      // Server returns TwoFactorProviders2["1"] = { Email: "u***@e***.com" } (capital E,
+      // Bitwarden-compatible). Accept both casings defensively so the masked address shows.
+      const maskedEmail = (typeof p1?.['Email'] === 'string' ? p1['Email']
+        : typeof p1?.['email'] === 'string' ? p1['email'] : null) ?? normalizedEmail;
       await sendEmailLoginCode(normalizedEmail, derived.hash);
       return {
         kind: 'email',

@@ -248,18 +248,11 @@ describe('emailProvider.buildChallenge', () => {
     await expect(emailProvider.buildChallenge(ctx)).rejects.toThrow('Email 2FA not enrolled');
   });
 
-  it('throws when sender not configured', async () => {
-    const ctx = {
-      user: makeUser(),
-      env: fakeEnvNoEmail as typeof fakeEnv,
-      db: {} as D1Database,
-      twoFactorRows: [makeEnrollmentRow()],
-    };
-    await expect(emailProvider.buildChallenge(ctx)).rejects.toThrow('Email sender not configured');
-  });
-
-  it('stores challenge row, sends code, returns masked email', async () => {
-    mockFetch.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+  it('returns masked email only — does NOT generate, store, or send a code', async () => {
+    // Regression guard: sending is owned solely by handleSendEmailLogin. buildChallenge
+    // only announces the masked destination for TwoFactorProviders2["1"]. Previously it
+    // also generated + sent a code, causing two emails per login (the first immediately
+    // overwritten/invalidated by the client-triggered send).
     const ctx = {
       user: makeUser(),
       env: fakeEnv as typeof fakeEnv,
@@ -267,29 +260,24 @@ describe('emailProvider.buildChallenge', () => {
       twoFactorRows: [makeEnrollmentRow('user@example.com')],
     };
     const result = await emailProvider.buildChallenge(ctx) as { Email: string };
-    expect(result.Email).toMatch(/u\*\*\*/);      // masked
-    expect(mockUpsertTwoFactor).toHaveBeenCalledOnce();
-    const upsertArg = (mockUpsertTwoFactor.mock.calls[0] as unknown[])[1] as TwoFactorRow;
-    expect(upsertArg.atype).toBe(EMAIL_LOGIN_CHALLENGE_ATYPE);
-    const stored = JSON.parse(upsertArg.data) as { code: string; attempts: number };
-    expect(stored.code).toHaveLength(6);
-    expect(/^\d{6}$/.test(stored.code)).toBe(true);
-    expect(stored.attempts).toBe(0);
-    expect(mockFetch).toHaveBeenCalledOnce(); // HTTP API call
+    expect(result.Email).toMatch(/^u\*\*\*@/);            // masked, capital-E key
+    expect(mockUpsertTwoFactor).not.toHaveBeenCalled();   // no challenge row written
+    expect(mockFetch).not.toHaveBeenCalled();             // no email sent
   });
 
-  it('throws if email API fails (send failure must not be swallowed)', async () => {
-    // First attempt + one retry both fail.
-    mockFetch
-      .mockResolvedValueOnce(new Response('{"message":"API error"}', { status: 500 }))
-      .mockResolvedValueOnce(new Response('{"message":"API error"}', { status: 500 }));
+  it('does not touch the sender even when email backend is unconfigured', async () => {
+    // buildChallenge must announce the provider regardless of sender config — an
+    // unconfigured backend must not block the challenge list (it only blocks send,
+    // which is handleSendEmailLogin's job).
     const ctx = {
       user: makeUser(),
-      env: fakeEnv as typeof fakeEnv,
+      env: fakeEnvNoEmail as typeof fakeEnv,
       db: {} as D1Database,
-      twoFactorRows: [makeEnrollmentRow()],
+      twoFactorRows: [makeEnrollmentRow('user@example.com')],
     };
-    await expect(emailProvider.buildChallenge(ctx)).rejects.toThrow('Email send failed');
+    const result = await emailProvider.buildChallenge(ctx) as { Email: string };
+    expect(result.Email).toMatch(/^u\*\*\*@/);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
 

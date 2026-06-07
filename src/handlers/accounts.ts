@@ -675,7 +675,11 @@ export async function handleSetTotpStatus(request: Request, env: Env, userId: st
         targetId: user.id,
         metadata: auditRequestMetadata(request),
       });
-      return jsonResponse({ enabled: true, recoveryCode: user.totpRecoveryCode, object: 'twoFactor' });
+      // Note: the recovery code (plaintext) is surfaced to the user only via the
+      // dedicated GET /api/accounts/totp/recovery-code endpoint, which is called
+      // during setup before enabling. We intentionally do NOT return it here — the
+      // stored value is a hash and returning it would be a misleading dead field.
+      return jsonResponse({ enabled: true, object: 'twoFactor' });
     }
 
     // --- Re-enable path: no new secret, just restore the existing one ---
@@ -848,8 +852,11 @@ export async function handleRecoverTwoFactor(request: Request, env: Env): Promis
   // Recovery code = destructive escape hatch: wipe ALL 2FA providers.
   user.totpSecret = null;
   user.totpEnabled = true; // reset to default; user will start fresh if they re-setup TOTP
-  // Rotate and immediately hash the new recovery code (one-time use).
-  user.totpRecoveryCode = await hashRecoveryCode(createRecoveryCode());
+  // Rotate the recovery code (one-time use): keep the plaintext to return to the
+  // caller, persist only the hash. (Bug fix: the plaintext used to be discarded and
+  // the hash returned, leaving the rotated recovery code unusable for the user.)
+  const rotatedRecoveryCode = createRecoveryCode();
+  user.totpRecoveryCode = await hashRecoveryCode(rotatedRecoveryCode);
   user.securityStamp = generateUUID();
   user.updatedAt = new Date().toISOString();
   await storage.saveUser(user);
@@ -871,7 +878,7 @@ export async function handleRecoverTwoFactor(request: Request, env: Env): Promis
   return jsonResponse({
     success: true,
     twoFactorEnabled: false,
-    newRecoveryCode: user.totpRecoveryCode,
+    newRecoveryCode: rotatedRecoveryCode,
     object: 'twoFactorRecovery',
   });
 }
