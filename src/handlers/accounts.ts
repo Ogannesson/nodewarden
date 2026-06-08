@@ -1025,6 +1025,7 @@ import {
   reenableAllWebAuthn,
   webAuthnProvider,
 } from '../services/two-factor/webauthn-provider';
+import { WebAuthnConfigError } from '../utils/passkey';
 
 /**
  * GET /api/two-factor/webauthn
@@ -1066,7 +1067,19 @@ export async function handleGetWebAuthnChallenge(request: Request, env: Env, use
 
   const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
   const existingCredentials = listCredentials(twoFactorRows);
-  const options = await generateRegistrationChallenge(env.DB, user, env, existingCredentials);
+
+  // Build the registration challenge, but degrade gracefully when WebAuthn rpId/origin
+  // is not configured (#7 makes extractRpIdAndOrigin throw a WebAuthnConfigError). In that
+  // case we still return the existing keys + enabled status so the UI can show them and the
+  // re-enable entry point; only "register a new credential" is unavailable. Any OTHER error
+  // (DB, parse, …) is re-thrown so it surfaces as a real failure instead of being masked.
+  let options: Record<string, unknown>;
+  try {
+    options = await generateRegistrationChallenge(env.DB, user, env, existingCredentials);
+  } catch (err) {
+    if (!(err instanceof WebAuthnConfigError)) throw err;
+    options = { status: 'error', errorMessage: 'WebAuthn not configured' };
+  }
 
   // Surface enabled status so the front-end can distinguish:
   //   enabled=true, retainedCredentials>0  → active
@@ -1287,7 +1300,10 @@ export async function handleReenableWebAuthn(request: Request, env: Env, userId:
     let options: Record<string, unknown>;
     try {
       options = (await webAuthnProvider.buildChallenge(webAuthnCtx)) as Record<string, unknown>;
-    } catch {
+    } catch (err) {
+      // Only a missing/invalid WebAuthn rpId/origin config is a client-actionable 400.
+      // Re-throw anything else (DB failure, etc.) so it is not masked as a config issue.
+      if (!(err instanceof WebAuthnConfigError)) throw err;
       return errorResponse('WebAuthn is not available or not configured', 400);
     }
     return jsonResponse({ ...options, object: 'twoFactorWebAuthnReenableChallenge' });

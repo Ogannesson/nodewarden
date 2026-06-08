@@ -34,11 +34,13 @@ class_name = "BackupTransferRunner"
 name = "EMAIL"
 remote = true
 
-# WebAuthn relying-party config (#7). REQUIRED for passkey 2FA — set as Worker
-# vars/secrets (or in .dev.vars for local dev). No Host-header fallback: the server
-# refuses WebAuthn registration/authentication if either value is missing.
-#   WEBAUTHN_RP_ID  = "vault.example.com"
-#   WEBAUTHN_ORIGIN = "https://vault.example.com"
+# WebAuthn relying-party config (#7). REQUIRED for passkey 2FA — no Host-header
+# fallback: the server refuses WebAuthn registration/authentication if either is
+# missing. rpId = registrable domain (no scheme/port); origin = full origin the
+# browser sends. Non-secret (public domain), so plaintext [vars] is fine.
+[vars]
+WEBAUTHN_RP_ID = "nodewarden.oganneson.com"
+WEBAUTHN_ORIGIN = "https://nodewarden.oganneson.com"
 
 [[r2_buckets]]
 binding = "ATTACHMENTS"

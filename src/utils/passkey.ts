@@ -440,21 +440,34 @@ export function parseAuthenticatorData(authData: Uint8Array): ParsedAuthenticato
 // refuses WebAuthn entirely (no Host-header fallback).
 // ---------------------------------------------------------------------------
 
+/**
+ * Thrown by extractRpIdAndOrigin when the WebAuthn relying-party config is missing or
+ * invalid. Callers catch this specifically to degrade gracefully (e.g. the status
+ * endpoint still returns existing keys, only "register a new credential" is disabled)
+ * WITHOUT swallowing unrelated failures (DB errors, parse errors) that must surface.
+ */
+export class WebAuthnConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WebAuthnConfigError';
+  }
+}
+
 export function extractRpIdAndOrigin(env: { WEBAUTHN_RP_ID?: string; WEBAUTHN_ORIGIN?: string }): { rpId: string; origin: string } {
   const rpId = (env.WEBAUTHN_RP_ID ?? '').trim();
   const origin = (env.WEBAUTHN_ORIGIN ?? '').trim();
   if (!rpId || !origin) {
-    throw new Error('WebAuthn is not configured: WEBAUTHN_RP_ID and WEBAUTHN_ORIGIN must both be set');
+    throw new WebAuthnConfigError('WebAuthn is not configured: WEBAUTHN_RP_ID and WEBAUTHN_ORIGIN must both be set');
   }
   let originHost: string;
   try {
     originHost = new URL(origin).hostname;
   } catch {
-    throw new Error('WEBAUTHN_ORIGIN is not a valid URL');
+    throw new WebAuthnConfigError('WEBAUTHN_ORIGIN is not a valid URL');
   }
   // The configured origin's host must equal the rpId or be a subdomain of it.
   if (originHost !== rpId && !originHost.endsWith(`.${rpId}`)) {
-    throw new Error('WEBAUTHN_ORIGIN host must equal or be a subdomain of WEBAUTHN_RP_ID');
+    throw new WebAuthnConfigError('WEBAUTHN_ORIGIN host must equal or be a subdomain of WEBAUTHN_RP_ID');
   }
   return { rpId, origin };
 }
