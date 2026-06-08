@@ -137,13 +137,13 @@ export interface AppMainRoutesProps {
   emailTwoFactorAvailable?: boolean;
   emailTwoFactorEnrolledEmail?: string | null;
   onDisableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
-  onReEnableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
+  onReEnableEmailTwoFactor?: (masterPassword: string, token?: string) => Promise<{ codeSent: boolean; email?: string | null }>;
   onSendEmailSetupCode?: (email: string, masterPassword: string) => Promise<void>;
   onEnableEmailTwoFactor?: (email: string, masterPassword: string, token: string) => Promise<void>;
   emailTwoFactorQueryError?: boolean;
   webAuthnKeysQueryError?: boolean;
   totpConfigured?: boolean;
-  onReEnableTotp?: (masterPassword: string) => Promise<void>;
+  onReEnableTotp?: (masterPassword: string, token: string) => Promise<void>;
   onCreateInvite: (hours: number) => Promise<void>;
   onRefreshAdmin: () => void;
   onDeleteAllInvites: () => Promise<void>;

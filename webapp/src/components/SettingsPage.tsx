@@ -18,8 +18,8 @@ interface SettingsPageProps {
   onSavePasswordHint: (masterPasswordHint: string) => Promise<void>;
   onEnableTotp: (secret: string, token: string) => Promise<void>;
   onOpenDisableTotp: () => void;
-  /** Re-enable TOTP using only master password (no re-scan needed). */
-  onReEnableTotp?: (masterPassword: string) => Promise<void>;
+  /** Re-enable TOTP. #11 requires a live verifier code in addition to the master password. */
+  onReEnableTotp?: (masterPassword: string, token: string) => Promise<void>;
   onGetRecoveryCode: (masterPassword: string) => Promise<string>;
   onGetApiKey: (masterPassword: string) => Promise<string>;
   onRotateApiKey: (masterPassword: string) => Promise<string>;
@@ -43,8 +43,8 @@ interface SettingsPageProps {
   /** Masked enrolled email address returned by GET /api/two-factor/email (e.g. t***@example.com). */
   emailTwoFactorEnrolledEmail?: string | null;
   onDisableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
-  /** Re-enable email 2FA using only master password (no re-enrollment needed). */
-  onReEnableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
+  /** Re-enable email 2FA. #11 two-phase: no token -> emails a code (returns codeSent + masked email); with token -> verifies and re-enables. */
+  onReEnableEmailTwoFactor?: (masterPassword: string, token?: string) => Promise<{ codeSent: boolean; email?: string | null }>;
   /** Step 1: send setup verification code to target email. */
   onSendEmailSetupCode?: (email: string, masterPassword: string) => Promise<void>;
   /** Step 2: verify OTP code and complete enrollment. */
@@ -155,16 +155,23 @@ export default function SettingsPage(props: SettingsPageProps) {
   const [emailMfaDisableSubmitting, setEmailMfaDisableSubmitting] = useState(false);
 
   // Re-enable dialogs (shown when configured+disabled → toggle ON)
+  // #11: re-enabling now requires a live factor proof, not just the master password.
   const [reEnableTotpDialogOpen, setReEnableTotpDialogOpen] = useState(false);
   const [reEnableTotpPassword, setReEnableTotpPassword] = useState('');
+  const [reEnableTotpCode, setReEnableTotpCode] = useState('');
   const [reEnableTotpSubmitting, setReEnableTotpSubmitting] = useState(false);
 
   const [reEnableWebAuthnDialogOpen, setReEnableWebAuthnDialogOpen] = useState(false);
   const [reEnableWebAuthnPassword, setReEnableWebAuthnPassword] = useState('');
   const [reEnableWebAuthnSubmitting, setReEnableWebAuthnSubmitting] = useState(false);
 
+  // Email re-enable is two-phase: phase 1 sends a code (reEnableEmailCodeSent flips true,
+  // reEnableEmailMasked holds the masked address), phase 2 submits the code.
   const [reEnableEmailDialogOpen, setReEnableEmailDialogOpen] = useState(false);
   const [reEnableEmailPassword, setReEnableEmailPassword] = useState('');
+  const [reEnableEmailCode, setReEnableEmailCode] = useState('');
+  const [reEnableEmailCodeSent, setReEnableEmailCodeSent] = useState(false);
+  const [reEnableEmailMasked, setReEnableEmailMasked] = useState<string | null>(null);
   const [reEnableEmailSubmitting, setReEnableEmailSubmitting] = useState(false);
 
   // Email 2FA initial enrollment wizard (step1 = email+password, step2 = OTP)
@@ -299,13 +306,15 @@ export default function SettingsPage(props: SettingsPageProps) {
   }
 
   async function submitReEnableTotp(): Promise<void> {
-    if (!reEnableTotpPassword.trim() || reEnableTotpSubmitting) return;
+    // #11: re-enable requires the master password AND a live verifier code.
+    if (!reEnableTotpPassword.trim() || !reEnableTotpCode.trim() || reEnableTotpSubmitting) return;
     setReEnableTotpSubmitting(true);
     try {
-      await props.onReEnableTotp?.(reEnableTotpPassword);
+      await props.onReEnableTotp?.(reEnableTotpPassword, reEnableTotpCode.trim());
       props.onNotify?.('success', t('txt_totp_reenabled'));
       setReEnableTotpDialogOpen(false);
       setReEnableTotpPassword('');
+      setReEnableTotpCode('');
       setTotpLocked(true);
     } catch (e) {
       props.onNotify?.('error', e instanceof Error ? e.message : t('txt_reenable_totp_failed'));
@@ -329,14 +338,41 @@ export default function SettingsPage(props: SettingsPageProps) {
     }
   }
 
-  async function submitReEnableEmail(): Promise<void> {
+  function resetReEnableEmail(): void {
+    setReEnableEmailDialogOpen(false);
+    setReEnableEmailPassword('');
+    setReEnableEmailCode('');
+    setReEnableEmailCodeSent(false);
+    setReEnableEmailMasked(null);
+  }
+
+  // #11 phase 1: verify the master password and have the server email a code to the
+  // enrolled address, then advance the dialog to the code-entry step.
+  async function submitReEnableEmailSendCode(): Promise<void> {
     if (!reEnableEmailPassword.trim() || reEnableEmailSubmitting) return;
     setReEnableEmailSubmitting(true);
     try {
-      await props.onReEnableEmailTwoFactor?.(reEnableEmailPassword);
+      const result = await props.onReEnableEmailTwoFactor?.(reEnableEmailPassword);
+      if (result?.codeSent) {
+        setReEnableEmailCodeSent(true);
+        setReEnableEmailMasked(result.email ?? null);
+        setReEnableEmailCode('');
+      }
+    } catch (e) {
+      props.onNotify?.('error', e instanceof Error ? e.message : t('txt_email_otp_send_failed'));
+    } finally {
+      setReEnableEmailSubmitting(false);
+    }
+  }
+
+  // #11 phase 2: submit the emailed code to verify and re-enable.
+  async function submitReEnableEmailVerify(): Promise<void> {
+    if (!reEnableEmailPassword.trim() || !reEnableEmailCode.trim() || reEnableEmailSubmitting) return;
+    setReEnableEmailSubmitting(true);
+    try {
+      await props.onReEnableEmailTwoFactor?.(reEnableEmailPassword, reEnableEmailCode.trim());
       props.onNotify?.('success', t('txt_email_mfa_reenabled'));
-      setReEnableEmailDialogOpen(false);
-      setReEnableEmailPassword('');
+      resetReEnableEmail();
     } catch (e) {
       props.onNotify?.('error', e instanceof Error ? e.message : t('txt_reenable_email_mfa_failed'));
     } finally {
@@ -1194,20 +1230,21 @@ export default function SettingsPage(props: SettingsPageProps) {
         </label>
       </ConfirmDialog>
 
-      {/* Re-enable TOTP dialog */}
+      {/* Re-enable TOTP dialog — #11 requires the master password plus a live verifier code. */}
       <ConfirmDialog
         open={reEnableTotpDialogOpen}
         title={t('txt_reenable_totp')}
         message={t('txt_reenable_totp_msg')}
         confirmText={t('txt_reenable_totp')}
         cancelText={t('txt_cancel')}
-        confirmDisabled={reEnableTotpSubmitting || !reEnableTotpPassword.trim()}
+        confirmDisabled={reEnableTotpSubmitting || !reEnableTotpPassword.trim() || !reEnableTotpCode.trim()}
         cancelDisabled={reEnableTotpSubmitting}
         onConfirm={() => void submitReEnableTotp()}
         onCancel={() => {
           if (!reEnableTotpSubmitting) {
             setReEnableTotpDialogOpen(false);
             setReEnableTotpPassword('');
+            setReEnableTotpCode('');
           }
         }}
       >
@@ -1221,14 +1258,26 @@ export default function SettingsPage(props: SettingsPageProps) {
             onInput={(e) => setReEnableTotpPassword((e.currentTarget as HTMLInputElement).value)}
           />
         </label>
+        <label className="field">
+          <span>{t('txt_reenable_totp_code')}</span>
+          <input
+            className="input"
+            value={reEnableTotpCode}
+            autoComplete="one-time-code"
+            inputMode="numeric"
+            placeholder={t('txt_reenable_totp_code_placeholder')}
+            onInput={(e) => setReEnableTotpCode((e.currentTarget as HTMLInputElement).value)}
+          />
+        </label>
       </ConfirmDialog>
 
-      {/* Re-enable WebAuthn dialog */}
+      {/* Re-enable WebAuthn dialog — #11: confirm the password, then prove live possession
+          via navigator.credentials.get (driven inside the handler). */}
       <ConfirmDialog
         open={reEnableWebAuthnDialogOpen}
         title={t('txt_reenable_webauthn')}
         message={t('txt_reenable_webauthn_msg')}
-        confirmText={t('txt_reenable_webauthn')}
+        confirmText={reEnableWebAuthnSubmitting ? t('txt_reenable_webauthn_verifying') : t('txt_reenable_webauthn')}
         cancelText={t('txt_cancel')}
         confirmDisabled={reEnableWebAuthnSubmitting || !reEnableWebAuthnPassword.trim()}
         cancelDisabled={reEnableWebAuthnSubmitting}
@@ -1250,24 +1299,36 @@ export default function SettingsPage(props: SettingsPageProps) {
             onInput={(e) => setReEnableWebAuthnPassword((e.currentTarget as HTMLInputElement).value)}
           />
         </label>
+        <p className="settings-field-note">{t('txt_reenable_webauthn_prompt')}</p>
       </ConfirmDialog>
 
-      {/* Re-enable Email MFA dialog */}
+      {/* Re-enable Email MFA dialog — #11 two-phase: phase 1 emails a code, phase 2 verifies it. */}
       <ConfirmDialog
         open={reEnableEmailDialogOpen}
         title={t('txt_reenable_email_mfa')}
-        message={t('txt_reenable_email_mfa_msg')}
-        confirmText={t('txt_reenable_email_mfa')}
+        message={reEnableEmailCodeSent ? t('txt_reenable_email_mfa_verify_msg') : t('txt_reenable_email_mfa_msg')}
+        confirmText={reEnableEmailCodeSent
+          ? t('txt_reenable_email_mfa')
+          : (reEnableEmailSubmitting ? t('txt_email_mfa_setup_sending') : t('txt_reenable_email_send_code'))}
         cancelText={t('txt_cancel')}
-        confirmDisabled={reEnableEmailSubmitting || !reEnableEmailPassword.trim()}
+        confirmDisabled={reEnableEmailSubmitting
+          || !reEnableEmailPassword.trim()
+          || (reEnableEmailCodeSent && !reEnableEmailCode.trim())}
         cancelDisabled={reEnableEmailSubmitting}
-        onConfirm={() => void submitReEnableEmail()}
+        onConfirm={() => void (reEnableEmailCodeSent ? submitReEnableEmailVerify() : submitReEnableEmailSendCode())}
         onCancel={() => {
-          if (!reEnableEmailSubmitting) {
-            setReEnableEmailDialogOpen(false);
-            setReEnableEmailPassword('');
-          }
+          if (!reEnableEmailSubmitting) resetReEnableEmail();
         }}
+        afterActions={reEnableEmailCodeSent ? (
+          <button
+            type="button"
+            className="btn btn-secondary dialog-btn"
+            disabled={reEnableEmailSubmitting}
+            onClick={() => void submitReEnableEmailSendCode()}
+          >
+            {t('txt_email_otp_resend')}
+          </button>
+        ) : undefined}
       >
         <label className="field">
           <span>{t('txt_master_password')}</span>
@@ -1276,9 +1337,29 @@ export default function SettingsPage(props: SettingsPageProps) {
             type="password"
             autoComplete="current-password"
             value={reEnableEmailPassword}
+            disabled={reEnableEmailCodeSent}
             onInput={(e) => setReEnableEmailPassword((e.currentTarget as HTMLInputElement).value)}
           />
         </label>
+        {reEnableEmailCodeSent && (
+          <>
+            <p className="settings-field-note">
+              {reEnableEmailMasked
+                ? t('txt_email_otp_sent_to', { email: reEnableEmailMasked })
+                : t('txt_reenable_email_code_sent_generic')}
+            </p>
+            <label className="field">
+              <span>{t('txt_email_otp_code')}</span>
+              <input
+                className="input"
+                value={reEnableEmailCode}
+                autoComplete="one-time-code"
+                inputMode="numeric"
+                onInput={(e) => setReEnableEmailCode((e.currentTarget as HTMLInputElement).value)}
+              />
+            </label>
+          </>
+        )}
       </ConfirmDialog>
     </div>
   );

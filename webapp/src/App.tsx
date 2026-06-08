@@ -24,6 +24,7 @@ import {
   getWebAuthnChallenge,
   getEmailTwoFactorStatus,
   reEnableTotp,
+  getWebAuthnReenableChallenge,
   reEnableWebAuthn,
   reEnableEmailTwoFactor,
   sendEmailSetupCode,
@@ -1771,7 +1772,12 @@ export default function App() {
     onReEnableWebAuthn: async (masterPassword: string) => {
       if (!profile) throw new Error('Profile unavailable');
       const derived = await deriveLoginHash(profile.email, masterPassword, defaultKdfIterations);
-      await reEnableWebAuthn(authedFetch, derived.hash);
+      // #11: prove live possession before re-enabling. Phase 1 returns the assertion
+      // challenge (same shape as performWebAuthnAssertion expects), the browser signs
+      // it via navigator.credentials.get, phase 2 verifies the assertion server-side.
+      const challenge = await getWebAuthnReenableChallenge(authedFetch, derived.hash);
+      const assertionJson = await performWebAuthnAssertion(challenge as Parameters<typeof performWebAuthnAssertion>[0]);
+      await reEnableWebAuthn(authedFetch, derived.hash, assertionJson);
       await webAuthnKeysQuery.refetch();
     },
     // When emailTwoFactor query errored and we have no prior data, don't collapse to false (would mislead as "disabled").
@@ -1781,11 +1787,14 @@ export default function App() {
     emailTwoFactorEnrolledEmail: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data ? undefined : emailTwoFactorQuery.data?.email ?? null,
     emailTwoFactorQueryError: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data,
     onDisableEmailTwoFactor: accountSecurityActions.disableEmailTwoFactor,
-    onReEnableEmailTwoFactor: async (masterPassword: string) => {
+    onReEnableEmailTwoFactor: async (masterPassword: string, token?: string) => {
       if (!profile) throw new Error('Profile unavailable');
       const derived = await deriveLoginHash(profile.email, masterPassword, defaultKdfIterations);
-      await reEnableEmailTwoFactor(authedFetch, derived.hash);
-      await emailTwoFactorQuery.refetch();
+      // #11 two-phase: no token -> server emails a code (phase 1); with token -> verify
+      // and re-enable (phase 2). Surface codeSent so the dialog can advance to code entry.
+      const result = await reEnableEmailTwoFactor(authedFetch, derived.hash, token);
+      if (token) await emailTwoFactorQuery.refetch();
+      return result;
     },
     onSendEmailSetupCode: async (email: string, masterPassword: string) => {
       if (!profile) throw new Error('Profile unavailable');
@@ -1799,10 +1808,11 @@ export default function App() {
       await emailTwoFactorQuery.refetch();
     },
     totpConfigured: totpStatusQuery.data?.configured,
-    onReEnableTotp: async (masterPassword: string) => {
+    onReEnableTotp: async (masterPassword: string, token: string) => {
       if (!profile) throw new Error('Profile unavailable');
       const derived = await deriveLoginHash(profile.email, masterPassword, defaultKdfIterations);
-      await reEnableTotp(authedFetch, derived.hash);
+      // #11: re-enabling TOTP requires a live verifier code proving current device possession.
+      await reEnableTotp(authedFetch, derived.hash, token);
       await totpStatusQuery.refetch();
     },
     onRefreshAdmin: adminActions.refreshAdmin,

@@ -650,17 +650,44 @@ export async function reEnableTotp(
 }
 
 /**
- * Re-enable all WebAuthn credentials after a reversible soft-disable.
- * Requires masterPasswordHash. Credentials are preserved from the previous disable.
+ * #11 phase 1: request a WebAuthn assertion challenge to re-enable previously
+ * disabled credentials. POSTs only the masterPasswordHash (no assertion); the
+ * server replies with the challenge options the browser needs for
+ * navigator.credentials.get(). The returned shape matches performWebAuthnAssertion's
+ * input (challenge / allowCredentials / rpId / userVerification / timeout), so it
+ * can be passed through directly.
  */
-export async function reEnableWebAuthn(
+export async function getWebAuthnReenableChallenge(
   authedFetch: AuthedFetch,
   masterPasswordHash: string
-): Promise<void> {
+): Promise<Record<string, unknown>> {
   const resp = await authedFetch('/api/two-factor/webauthn/reenable', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_disable_all_failed')));
+  }
+  return (await parseJson<Record<string, unknown>>(resp)) || {};
+}
+
+/**
+ * #11 phase 2: re-enable all WebAuthn credentials after proving live possession.
+ * Requires masterPasswordHash plus a serialized assertion (from performWebAuthnAssertion).
+ * Credentials are preserved from the previous disable; the server verifies the
+ * assertion against them before flipping enabled back on.
+ */
+export async function reEnableWebAuthn(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string,
+  assertionJson: string
+): Promise<void> {
+  const resp = await authedFetch('/api/two-factor/webauthn/reenable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ masterPasswordHash, token: assertionJson }),
   });
   if (!resp.ok) {
     const errBody = await parseJson<TokenError>(resp);
@@ -676,9 +703,10 @@ export async function reEnableEmailTwoFactor(
   authedFetch: AuthedFetch,
   masterPasswordHash: string,
   token?: string
-): Promise<{ codeSent: boolean }> {
+): Promise<{ codeSent: boolean; email?: string | null }> {
   // #11: two-phase — without a token the server sends a code to the enrolled address
-  // (phase 1); with the token it verifies and re-enables (phase 2).
+  // (phase 1); with the token it verifies and re-enables (phase 2). Phase 1 echoes the
+  // masked enrolled email so the UI can show where the code went.
   const resp = await authedFetch('/api/two-factor/email/reenable', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -688,8 +716,8 @@ export async function reEnableEmailTwoFactor(
     const errBody = await parseJson<TokenError>(resp);
     throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_reenable_email_mfa_failed')));
   }
-  const body = (await parseJson<{ codeSent?: boolean }>(resp)) || {};
-  return { codeSent: !!body.codeSent };
+  const body = (await parseJson<{ codeSent?: boolean; email?: string | null }>(resp)) || {};
+  return { codeSent: !!body.codeSent, email: body.email ?? null };
 }
 
 export async function getTotpRecoveryCode(
