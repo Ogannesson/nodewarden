@@ -138,20 +138,17 @@ async function popLoginChallenge(
   db: D1Database,
   userId: string
 ): Promise<LoginChallengeState | null> {
-  const row = await db
-    .prepare('SELECT data FROM two_factors WHERE user_id = ? AND atype = ?')
+  // Atomic consume: DELETE ... RETURNING eliminates the TOCTOU race between a
+  // separate SELECT and DELETE.  If two requests race, only one will receive a
+  // non-empty result; the other gets an empty array and must fail closed.
+  const result = await db
+    .prepare('DELETE FROM two_factors WHERE user_id = ? AND atype = ? RETURNING data')
     .bind(userId, WEBAUTHN_LOGIN_CHALLENGE_ATYPE)
-    .first<{ data: string }>();
+    .all<{ data: string }>();
 
-  // Delete immediately — even if state is missing or expired — preventing replay.
-  await db
-    .prepare('DELETE FROM two_factors WHERE user_id = ? AND atype = ?')
-    .bind(userId, WEBAUTHN_LOGIN_CHALLENGE_ATYPE)
-    .run();
-
-  if (!row) return null;
+  if (result.results.length === 0) return null;
   try {
-    return JSON.parse(row.data) as LoginChallengeState;
+    return JSON.parse(result.results[0].data) as LoginChallengeState;
   } catch {
     return null;
   }
@@ -211,7 +208,9 @@ function parseAttestationObject(attestationObjectBase64Url: string): Uint8Array 
 }
 
 /** Skip one CBOR-encoded value, returning the offset after it. */
-function skipCborValue(buf: Uint8Array, offset: number): number {
+function skipCborValue(buf: Uint8Array, offset: number, depth: number = 0): number {
+  if (depth > 32) throw new Error('CBOR skip: nesting depth limit exceeded');
+  if (offset >= buf.length) throw new Error('CBOR skip: unexpected end of buffer');
   const first = buf[offset];
   const majorType = (first >> 5) & 0x07;
   const addInfo = first & 0x1f;
@@ -219,8 +218,14 @@ function skipCborValue(buf: Uint8Array, offset: number): number {
 
   function readLen(): number {
     if (addInfo <= 23) return addInfo;
-    if (addInfo === 24) { const l = buf[offset]; offset++; return l; }
-    if (addInfo === 25) { const l = (buf[offset] << 8) | buf[offset + 1]; offset += 2; return l; }
+    if (addInfo === 24) {
+      if (offset >= buf.length) throw new Error('CBOR skip: unexpected end of buffer');
+      const l = buf[offset]; offset++; return l;
+    }
+    if (addInfo === 25) {
+      if (offset + 1 >= buf.length) throw new Error('CBOR skip: unexpected end of buffer');
+      const l = (buf[offset] << 8) | buf[offset + 1]; offset += 2; return l;
+    }
     throw new Error('CBOR skip: unsupported length');
   }
 
@@ -228,12 +233,12 @@ function skipCborValue(buf: Uint8Array, offset: number): number {
   if (majorType === 2 || majorType === 3) return offset + readLen();
   if (majorType === 4) {
     const n = readLen();
-    for (let i = 0; i < n; i++) offset = skipCborValue(buf, offset);
+    for (let i = 0; i < n; i++) offset = skipCborValue(buf, offset, depth + 1);
     return offset;
   }
   if (majorType === 5) {
     const n = readLen();
-    for (let i = 0; i < n * 2; i++) offset = skipCborValue(buf, offset);
+    for (let i = 0; i < n * 2; i++) offset = skipCborValue(buf, offset, depth + 1);
     return offset;
   }
   throw new Error(`CBOR skip: unsupported major type ${majorType}`);
@@ -282,11 +287,10 @@ export class WebAuthnTwoFactorProvider implements TwoFactorProvider {
   async buildChallenge(ctx: ChallengeContext): Promise<Record<string, unknown>> {
     const { user, db, twoFactorRows } = ctx;
 
-    // Derive rpId and origin from the incoming request URL.
-    // If no request is available fall back to localhost (dev/test only).
-    const { rpId, origin } = ctx.request
-      ? extractRpIdAndOrigin(ctx.request)
-      : { rpId: 'localhost', origin: 'http://localhost' };
+    // #7: rpId/origin come from server config (env), never the Host header.
+    // extractRpIdAndOrigin throws if WEBAUTHN_RP_ID/WEBAUTHN_ORIGIN are unset —
+    // the challenge builder treats that as "WebAuthn unavailable".
+    const { rpId, origin } = extractRpIdAndOrigin(ctx.env);
 
     const challengeBytes = randomChallenge(32);
     const challengeB64 = bytesToBase64Url(challengeBytes);
@@ -406,6 +410,7 @@ export class WebAuthnTwoFactorProvider implements TwoFactorProvider {
 
     // --- Step 8: signCount regression ---
     const newSignCount = parsedAuthData.signCount;
+    // WebAuthn L2 §7.2 step 17: when both stored and new signCount are 0, the authenticator keeps no counter — skip clone detection (spec-compliant).
     if (credential.signCount > 0 && newSignCount <= credential.signCount) {
       // Potential credential clone — log and reject
       await safeWriteAuditEvent(env, {
@@ -477,10 +482,11 @@ export interface WebAuthnRegistrationOptions {
 export async function generateRegistrationChallenge(
   db: D1Database,
   user: User,
-  request: Request,
+  env: { WEBAUTHN_RP_ID?: string; WEBAUTHN_ORIGIN?: string },
   existingCredentials: WebAuthnCredential[]
 ): Promise<Record<string, unknown>> {
-  const { rpId, origin } = extractRpIdAndOrigin(request);
+  // #7: rpId/origin from server config (env), never the Host header.
+  const { rpId, origin } = extractRpIdAndOrigin(env);
   const challengeBytes = randomChallenge(32);
   const challengeB64 = bytesToBase64Url(challengeBytes);
 
@@ -552,21 +558,19 @@ export async function completeRegistration(
   body: RegistrationBody,
   env: Env
 ): Promise<WebAuthnCredential> {
-  // Pop registration challenge
-  const row = await db
-    .prepare('SELECT data FROM two_factors WHERE user_id = ? AND atype = ?')
+  // Pop registration challenge — atomic DELETE … RETURNING prevents replay.
+  // If two requests race, only one will receive a non-empty result set;
+  // the other gets an empty array and throws, fail-closed.
+  const regResult = await db
+    .prepare('DELETE FROM two_factors WHERE user_id = ? AND atype = ? RETURNING data')
     .bind(user.id, WEBAUTHN_REG_CHALLENGE_ATYPE)
-    .first<{ data: string }>();
-  await db
-    .prepare('DELETE FROM two_factors WHERE user_id = ? AND atype = ?')
-    .bind(user.id, WEBAUTHN_REG_CHALLENGE_ATYPE)
-    .run();
+    .all<{ data: string }>();
 
-  if (!row) throw new Error('Registration challenge not found or expired');
+  if (regResult.results.length === 0) throw new Error('Registration challenge not found or expired');
 
   let state: RegChallengeState;
   try {
-    state = JSON.parse(row.data) as RegChallengeState;
+    state = JSON.parse(regResult.results[0].data) as RegChallengeState;
   } catch {
     throw new Error('Invalid registration challenge state');
   }

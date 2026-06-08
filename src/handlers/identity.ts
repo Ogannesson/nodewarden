@@ -6,7 +6,7 @@ import { jsonResponse, errorResponse, identityErrorResponse } from '../utils/res
 import { LIMITS } from '../config/limits';
 import { createRefreshToken } from '../utils/jwt';
 import { readAuthRequestDeviceInfo } from '../utils/device';
-import { recoveryCodeEquals } from '../utils/recovery-code';
+import { recoveryCodeEquals, hashRecoveryCode, createRecoveryCode, sha256Hex } from '../utils/recovery-code';
 import { generateUUID } from '../utils/uuid';
 import { issueSendAccessToken } from './sends';
 import {
@@ -39,6 +39,10 @@ const WEB_REFRESH_COOKIE = 'nodewarden_web_refresh';
 const TWO_FACTOR_PROVIDER_RECOVERY_CODE_RESPONSE = '-1';
 const TWO_FACTOR_PROVIDER_RECOVERY_CODE_LEGACY = 8;
 const TWO_FACTOR_PROVIDER_RECOVERY_CODE_ANDROID_REQUEST = 100;
+// #10: short-lived D1 row (two_factors) holding the freshly-rotated recovery code in
+// plaintext so the user can retrieve it once via GET /api/two-factor/recover.
+const RECOVERY_PENDING_ATYPE = 1005;
+const RECOVERY_PENDING_TTL_MS = 15 * 60 * 1000;
 
 async function resolveDeviceSession(
   storage: StorageService,
@@ -402,23 +406,46 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
         // H4: recoveryCodeEquals now compares against a SHA-256 hash (new format) or
         // falls back to plaintext comparison for legacy rows, returning an upgradedHash
         // to persist when the row was still plaintext (lazy migration).
-        const rcResult = await recoveryCodeEquals(normalizedTwoFactorToken, user.totpRecoveryCode);
+        // H5: capture stored code BEFORE comparison to close TOCTOU window.
+        // The atomic UPDATE uses the exact stored value as the WHERE predicate;
+        // if another request consumed it concurrently, changes===0 → fail-closed.
+        const oldStoredCode = user.totpRecoveryCode;
+        const rcResult = await recoveryCodeEquals(normalizedTwoFactorToken, oldStoredCode);
         if (!rcResult.match) {
           return recordFailedTwoFactorAndBuildResponse(rateLimit, loginIdentifier);
         }
-        // Disable TOTP (legacy column).
-        user.totpSecret = null;
-        // Clear the recovery code rather than rotating it: the token endpoint has no
-        // field to return a fresh plaintext code to the client, so rotating to a new
-        // hash here would leave the user with a permanently unknowable recovery code.
-        // Setting null lets them generate a fresh, displayable one via the dedicated
-        // recovery-code endpoint after they re-enable 2FA.
-        user.totpRecoveryCode = null;
-        user.updatedAt = new Date().toISOString();
-        await storage.saveUser(user);
+        // H5: atomic consume — sets totp_recovery_code = NULL and totp_secret = NULL
+        // in a single UPDATE WHERE totp_recovery_code = <oldStoredCode>.
+        // Returns false (changes === 0) when a concurrent request beat us to it.
+        const consumed = await storage.atomicConsumeRecoveryCode(user.id, oldStoredCode!);
+        if (!consumed) {
+          return recordFailedTwoFactorAndBuildResponse(rateLimit, loginIdentifier);
+        }
         // Disable all non-TOTP 2FA providers stored in two_factors table.
         await storage.deleteAllTwoFactorsByUserId(user.id);
         await storage.deleteRefreshTokensByUserId(user.id);
+
+        // #10: rotate the recovery code so the account is never left without one
+        // (avoids permanent lockout). Store the new hash on the user and stash the
+        // plaintext in a short-lived D1 row, retrievable once via
+        // GET /api/two-factor/recover.
+        const rotatedRecoveryCode = createRecoveryCode();
+        const rotatedUser = await storage.getUserById(user.id);
+        if (rotatedUser) {
+          rotatedUser.totpRecoveryCode = await hashRecoveryCode(rotatedRecoveryCode);
+          rotatedUser.updatedAt = new Date().toISOString();
+          await storage.saveUser(rotatedUser);
+        }
+        await upsertTwoFactor(env.DB, {
+          userId: user.id,
+          atype: RECOVERY_PENDING_ATYPE,
+          enabled: true,
+          data: JSON.stringify({ code: rotatedRecoveryCode, createdAt: Date.now() }),
+          lastUsed: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+
         rememberRequested = false;
       } else {
         // Dispatch to the provider identified by twoFactorProvider.
@@ -976,7 +1003,7 @@ export async function handleSendEmailLogin(request: Request, env: Env): Promise<
     userId: user.id,
     atype: EMAIL_LOGIN_CHALLENGE_ATYPE,
     enabled: true,
-    data: JSON.stringify({ code, createdAt: Date.now(), attempts: 0 }),
+    data: JSON.stringify({ code: await sha256Hex(code), createdAt: Date.now(), attempts: 0, targetEmail }),
     lastUsed: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -1005,4 +1032,29 @@ export async function handleSendEmailLogin(request: Request, env: Env): Promise<
   }
 
   return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
+
+/**
+ * GET /api/two-factor/recover
+ * #10: one-time retrieval of the freshly-rotated recovery code (plaintext) after a
+ * recovery-code login. Returns the code once, then deletes the pending D1 row.
+ */
+export async function handleGetRotatedRecoveryCode(_request: Request, env: Env, userId: string): Promise<Response> {
+  const row = await getTwoFactor(env.DB, userId, RECOVERY_PENDING_ATYPE);
+  if (!row) return jsonResponse({ code: null, object: 'twoFactorRecover' });
+
+  let parsed: { code: string; createdAt: number };
+  try {
+    parsed = JSON.parse(row.data) as { code: string; createdAt: number };
+  } catch {
+    await deleteTwoFactor(env.DB, userId, RECOVERY_PENDING_ATYPE);
+    return jsonResponse({ code: null, object: 'twoFactorRecover' });
+  }
+
+  // Consume on read (one-time), regardless of expiry.
+  await deleteTwoFactor(env.DB, userId, RECOVERY_PENDING_ATYPE);
+  if (Date.now() - parsed.createdAt > RECOVERY_PENDING_TTL_MS) {
+    return jsonResponse({ code: null, object: 'twoFactorRecover' });
+  }
+  return jsonResponse({ code: parsed.code, object: 'twoFactorRecover' });
 }

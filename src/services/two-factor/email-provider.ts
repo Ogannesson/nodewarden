@@ -21,8 +21,6 @@
 import type { Env, User } from '../../types';
 import type { TwoFactorRow } from '../storage-two-factor-repo';
 import {
-  getTwoFactor,
-  upsertTwoFactor,
   deleteTwoFactor,
 } from '../storage-two-factor-repo';
 import type {
@@ -35,6 +33,7 @@ import { TwoFactorType } from './types';
 import { isEmailSenderConfigured } from '../email-sender';
 import { timingSafeEqual } from '../../utils/passkey';
 import { safeWriteAuditEvent } from '../audit-events';
+import { sha256Hex } from '../../utils/recovery-code';
 
 // ---------------------------------------------------------------------------
 // Internal atype for challenge state
@@ -64,12 +63,14 @@ interface EmailEnrollmentData {
 
 /** Stored in two_factors.data for atype=1002 (login challenge). */
 interface EmailChallenge {
-  /** 6-digit numeric string. */
+  /** SHA-256 hex digest of the 6-digit code (never stored in plaintext). */
   code: string;
   /** Unix-epoch milliseconds at creation. */
   createdAt: number;
   /** Failed verification attempts so far. */
   attempts: number;
+  /** The enrolled email this challenge is bound to (prevents enrollment-swap attacks). */
+  targetEmail: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,50 +154,74 @@ class EmailTwoFactorProvider implements TwoFactorProvider {
    * Verify a submitted 6-digit code.
    * Returns true on success (and deletes the challenge row).
    * Returns false on wrong code or expired/exceeded-attempts challenge.
+   *
+   * Security: the attempt counter is incremented atomically via a single
+   * conditional UPDATE…RETURNING, eliminating the TOCTOU race that existed
+   * between the old SELECT + application-level increment + upsert pattern.
+   * A concurrent second request will see the same post-increment state and
+   * will be blocked if the limit is already reached.
    */
   async verify(ctx: VerifyContext, token: string): Promise<boolean> {
     const { user, db, env } = ctx;
     const normalized = String(token ?? '').trim();
 
-    // Load the pending challenge row.
-    const challengeRow = await getTwoFactor(db, user.id, EMAIL_LOGIN_CHALLENGE_ATYPE);
-    if (!challengeRow) return false;
+    // Atomically increment the attempt counter and return the updated row.
+    // If no row exists (already deleted or never created) result.results is
+    // empty — fail closed without a second round-trip.
+    const result = await db
+      .prepare(
+        `UPDATE two_factors
+            SET data       = json_set(data, '$.attempts', json_extract(data, '$.attempts') + 1),
+                updated_at = ?
+          WHERE user_id = ?
+            AND atype   = ?
+          RETURNING data`,
+      )
+      .bind(new Date().toISOString(), user.id, EMAIL_LOGIN_CHALLENGE_ATYPE)
+      .all<{ data: string }>();
 
-    const challenge = JSON.parse(challengeRow.data) as EmailChallenge;
+    if (result.results.length === 0) {
+      // Row was not present (already consumed or never created).
+      return false;
+    }
 
-    // TTL check.
+    let challenge: EmailChallenge;
+    try {
+      challenge = JSON.parse(result.results[0].data) as EmailChallenge;
+    } catch {
+      // Corrupt state — remove and reject.
+      await deleteTwoFactor(db, user.id, EMAIL_LOGIN_CHALLENGE_ATYPE);
+      return false;
+    }
+
+    // TTL check on the returned (post-increment) state.
     const ageMs = Date.now() - challenge.createdAt;
     if (ageMs > CODE_TTL_S * 1000) {
-      // Expired — delete and reject.
       await deleteTwoFactor(db, user.id, EMAIL_LOGIN_CHALLENGE_ATYPE);
       return false;
     }
 
-    // Attempt limit check (before comparing, to prevent timing oracle).
-    if (challenge.attempts >= MAX_ATTEMPTS) {
+    // The UPDATE already counted this attempt.  If the post-increment value
+    // exceeds the limit, invalidate and reject.
+    if (challenge.attempts > MAX_ATTEMPTS) {
       await deleteTwoFactor(db, user.id, EMAIL_LOGIN_CHALLENGE_ATYPE);
       return false;
     }
 
-    // Constant-time comparison.
-    const match = await constantTimeEqualStrings(normalized, challenge.code);
+    // Constant-time comparison (attempt already counted; no second write on
+    // mismatch — the incremented counter persists in the DB).
+    const match = await constantTimeEqualStrings(await sha256Hex(normalized), challenge.code);
 
     if (!match) {
-      // Increment attempt counter; invalidate if limit reached.
-      const newAttempts = challenge.attempts + 1;
-      if (newAttempts >= MAX_ATTEMPTS) {
+      // If this attempt was the last allowed one, clean up so the row does
+      // not linger with a fully-exhausted counter.
+      if (challenge.attempts >= MAX_ATTEMPTS) {
         await deleteTwoFactor(db, user.id, EMAIL_LOGIN_CHALLENGE_ATYPE);
-      } else {
-        await upsertTwoFactor(db, {
-          ...challengeRow,
-          data: JSON.stringify({ ...challenge, attempts: newAttempts }),
-          updatedAt: new Date().toISOString(),
-        });
       }
       return false;
     }
 
-    // Success — delete the challenge (one-time use).
+    // Success — consume the challenge (one-time use).
     await deleteTwoFactor(db, user.id, EMAIL_LOGIN_CHALLENGE_ATYPE);
 
     await safeWriteAuditEvent(env, {

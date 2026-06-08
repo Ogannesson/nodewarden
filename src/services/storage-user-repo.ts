@@ -147,15 +147,93 @@ export async function deleteUserById(db: D1Database, id: string): Promise<boolea
 }
 
 /**
- * Update only the totp_last_counter column for replay protection.
+ * Atomically claim a TOTP counter for replay protection.
  *
- * Called by TotpTwoFactorProvider.verify after a successful TOTP validation,
- * before the access token is issued. This single-column update avoids re-running
- * the full saveUser upsert (which requires the safeBind helper).
+ * Uses a conditional UPDATE so that the check-and-write is atomic at the
+ * database level, eliminating the TOCTOU window that existed when the caller
+ * compared `totpLastCounter` in application memory and then wrote unconditionally.
+ *
+ * Returns `true` when the counter was actually written (the row existed and
+ * `counter` is strictly greater than the stored value, or the stored value was
+ * NULL).  Returns `false` when another concurrent request already claimed the
+ * same counter (changes === 0), which the caller must treat as a replay.
  */
-export async function updateTotpLastCounter(db: D1Database, userId: string, counter: number): Promise<void> {
-  await db
-    .prepare('UPDATE users SET totp_last_counter = ?, updated_at = ? WHERE id = ?')
-    .bind(counter, new Date().toISOString(), userId)
+export async function updateTotpLastCounter(
+  db: D1Database,
+  userId: string,
+  counter: number,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE users
+          SET totp_last_counter = ?,
+              updated_at        = ?
+        WHERE id = ?
+          AND (totp_last_counter IS NULL OR totp_last_counter < ?)`,
+    )
+    .bind(counter, new Date().toISOString(), userId, counter)
     .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+/**
+ * Atomically consume a recovery code for TOTP disable (login escape hatch).
+ *
+ * Uses a conditional UPDATE so the check-and-write is atomic at the database
+ * level, eliminating the TOCTOU window that existed when callers compared the
+ * stored hash in application memory and then wrote unconditionally.
+ *
+ * Returns `true` when the code was actually consumed (changes > 0).
+ * Returns `false` when another concurrent request already consumed it
+ * (changes === 0), which the caller MUST treat as failure (fail-closed).
+ */
+export async function atomicConsumeRecoveryCode(
+  db: D1Database,
+  userId: string,
+  storedCode: string,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE users
+          SET totp_recovery_code = NULL,
+              totp_secret        = NULL,
+              updated_at         = ?
+        WHERE id = ?
+          AND totp_recovery_code = ?`,
+    )
+    .bind(new Date().toISOString(), userId, storedCode)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+/**
+ * Atomically rotate a recovery code (account recovery / escape hatch flow).
+ *
+ * Wipes TOTP secret, re-enables TOTP with a fresh recovery code and a new
+ * security stamp — all in one conditional UPDATE keyed on the old stored hash.
+ * Returns `false` when another concurrent request already rotated the code
+ * (changes === 0), which the caller MUST treat as failure (fail-closed).
+ */
+export async function atomicRotateRecoveryCode(
+  db: D1Database,
+  userId: string,
+  oldStoredCode: string,
+  newHashedCode: string,
+  newSecurityStamp: string,
+  updatedAt: string,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE users
+          SET totp_recovery_code = ?,
+              totp_secret        = NULL,
+              totp_enabled       = 1,
+              security_stamp     = ?,
+              updated_at         = ?
+        WHERE id = ?
+          AND totp_recovery_code = ?`,
+    )
+    .bind(newHashedCode, newSecurityStamp, updatedAt, userId, oldStoredCode)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
 }

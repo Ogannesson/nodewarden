@@ -633,6 +633,31 @@ export default function App() {
     setEmailOtpRememberDevice(true);
   }
 
+  async function switchTotpToEmail() {
+    if (!pendingTotp) return;
+    const mode = pendingTotpMode;
+    const snapshot = { ...pendingTotp };
+    setPendingTotp(null);
+    setPendingTotpMode(null);
+    setTotpSubmitting(false);
+    // Trigger send before showing dialog; abort if it fails (user can retry via TOTP or recovery)
+    try {
+      await sendEmailLoginCode(snapshot.email, snapshot.passwordHash);
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : t('txt_email_otp_send_failed'));
+      return;
+    }
+    setPendingEmail({
+      email: snapshot.email,
+      passwordHash: snapshot.passwordHash,
+      masterKey: snapshot.masterKey,
+      maskedEmail: snapshot.email,
+    });
+    setPendingEmailMode(mode);
+    setEmailOtpCode('');
+    setEmailOtpRememberDevice(true);
+  }
+
   async function handleEmailOtpVerify() {
     if (emailOtpSubmitting) return;
     if (!pendingEmail) return;
@@ -1937,6 +1962,8 @@ export default function App() {
             navigate('/recover-2fa');
           }}
           totpSubmitting={totpSubmitting}
+          totpHasEmailFallback={pendingTotp?.hasEmailFallback ?? false}
+          onSwitchFromTotpToEmail={() => void switchTotpToEmail()}
           disableTotpOpen={false}
           disableTotpPassword=""
           onDisableTotpPasswordChange={() => {}}

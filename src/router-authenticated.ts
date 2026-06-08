@@ -65,6 +65,7 @@ import {
   handleRemoveSendAuth,
 } from './handlers/sends';
 import { handleSync } from './handlers/sync';
+import { handleGetRotatedRecoveryCode } from './handlers/identity';
 import { handleCiphersImport } from './handlers/import';
 import {
   handleCreateAttachment,
@@ -123,7 +124,7 @@ export async function handleAuthenticatedRoute(
 
   // WebAuthn (FIDO2) management endpoints — Bitwarden-compatible /api/two-factor/webauthn
   if (path === '/api/two-factor/webauthn' || path === '/api/two-factor/get-webauthn') {
-    if (method === 'GET' || method === 'POST' && path === '/api/two-factor/get-webauthn') {
+    if (method === 'GET' || (method === 'POST' && path === '/api/two-factor/get-webauthn')) {
       return handleGetWebAuthnChallenge(request, env, userId);
     }
     if (method === 'POST') return handleRegisterWebAuthn(request, env, userId);
@@ -148,6 +149,10 @@ export async function handleAuthenticatedRoute(
   // Email 2FA re-enable (reversible disable path)
   if (path === '/api/two-factor/email/reenable' && method === 'POST') {
     return handleReenableEmailTwoFactor(request, env, userId);
+  }
+  // #10: one-time retrieval of the rotated recovery code after a recovery-code login.
+  if (path === '/api/two-factor/recover' && method === 'GET') {
+    return handleGetRotatedRecoveryCode(request, env, userId);
   }
   // Authenticated send-email (setup flow): POST /api/two-factor/send-email
   if (path === '/api/two-factor/send-email' && method === 'POST') {

@@ -54,15 +54,21 @@ export class TotpTwoFactorProvider implements TwoFactorProvider {
     const matchedCounter = await verifyTotpToken(secret, token);
     if (matchedCounter === null) return false;
 
-    // H3 Replay protection: reject if this counter was already used.
-    if (user.totpLastCounter !== null && matchedCounter <= user.totpLastCounter) {
+    // Atomically claim the counter at the DB level (conditional UPDATE).
+    // The SQL WHERE clause checks that the stored counter is NULL or strictly
+    // less than matchedCounter, so concurrent requests with the same counter
+    // will find changes===0 and be rejected as replays — no application-level
+    // pre-check is needed (and would be a TOCTOU race if left in place).
+    try {
+      const claimed = await updateTotpLastCounter(db, user.id, matchedCounter);
+      if (!claimed) {
+        // Another concurrent request already claimed this counter — replay.
+        return false;
+      }
+    } catch {
+      // Fail closed: any DB error during the counter write must deny access.
       return false;
     }
-
-    // Persist the matched counter before the caller issues tokens. This write is
-    // intentionally placed inside verify() so that the counter is always committed
-    // regardless of which code path the caller takes after a successful verify.
-    await updateTotpLastCounter(db, user.id, matchedCounter);
 
     return true;
   }

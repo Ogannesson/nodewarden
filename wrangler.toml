@@ -34,6 +34,12 @@ class_name = "BackupTransferRunner"
 name = "EMAIL"
 remote = true
 
+# WebAuthn relying-party config (#7). REQUIRED for passkey 2FA — set as Worker
+# vars/secrets (or in .dev.vars for local dev). No Host-header fallback: the server
+# refuses WebAuthn registration/authentication if either value is missing.
+#   WEBAUTHN_RP_ID  = "vault.example.com"
+#   WEBAUTHN_ORIGIN = "https://vault.example.com"
+
 [[r2_buckets]]
 binding = "ATTACHMENTS"
 bucket_name = "nodewarden-attachments"

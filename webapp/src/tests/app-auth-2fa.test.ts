@@ -281,3 +281,80 @@ describe('performUnlock – WebAuthn 挑战识别', () => {
     expect(result.kind).toBe('email');
   });
 });
+
+// -----------------------------------------------------------------------
+// Bug #15 回归测试：TOTP + Email 同时启用时 Email fallback 可达
+// -----------------------------------------------------------------------
+
+/** TOTP + Email 同时存在的挑战响应（providers ['0','1']） */
+function makeTotpWithEmailChallengeResponse() {
+  return {
+    TwoFactorProviders: ['0', '1'],
+    TwoFactorProviders2: {
+      '0': null,
+      '1': { Email: 'u***@e***.com' },
+    },
+    error: 'invalid_grant',
+  };
+}
+
+describe('performPasswordLogin – TOTP + Email 同时启用（Bug #15 回归）', () => {
+  it('providers ["0","1"] → kind=totp，hasEmailFallback=true', async () => {
+    // 场景：用户同时启用了 TOTP(0) 和 Email 2FA(1)；无 WebAuthn
+    // 预期：走 TOTP 分支（优先级更高），但携带 hasEmailFallback=true
+    // 修复前 bug：providerKeys.includes('1') && !providerKeys.includes('0') → false
+    //             导致 email 分支完全不可达（用户被迫只能用 TOTP，无法切换 Email OTP）
+    (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeTotpWithEmailChallengeResponse(),
+    );
+
+    const result = await performPasswordLogin('user@example.com', 'password', 600000);
+
+    expect(result.kind).toBe('totp');
+    if (result.kind === 'totp') {
+      expect(result.pendingTotp.hasEmailFallback).toBe(true);
+    }
+  });
+
+  it('providers ["0"] 无 Email → kind=totp，hasEmailFallback=false', async () => {
+    // 只有 TOTP，无 Email fallback → hasEmailFallback 应为 false
+    (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeTotpOnlyChallengeResponse(),
+    );
+
+    const result = await performPasswordLogin('user@example.com', 'password', 600000);
+
+    expect(result.kind).toBe('totp');
+    if (result.kind === 'totp') {
+      expect(result.pendingTotp.hasEmailFallback).toBe(false);
+    }
+  });
+});
+
+describe('performUnlock – TOTP + Email 同时启用（Bug #15 回归）', () => {
+  it('providers ["0","1"] → kind=totp，hasEmailFallback=true', async () => {
+    (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeTotpWithEmailChallengeResponse(),
+    );
+
+    const result = await performUnlock(MOCK_SESSION, null, 'password', 600000);
+
+    expect(result.kind).toBe('totp');
+    if (result.kind === 'totp') {
+      expect(result.pendingTotp.hasEmailFallback).toBe(true);
+    }
+  });
+
+  it('providers ["0"] 无 Email → kind=totp，hasEmailFallback=false', async () => {
+    (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeTotpOnlyChallengeResponse(),
+    );
+
+    const result = await performUnlock(MOCK_SESSION, null, 'password', 600000);
+
+    expect(result.kind).toBe('totp');
+    if (result.kind === 'totp') {
+      expect(result.pendingTotp.hasEmailFallback).toBe(false);
+    }
+  });
+});

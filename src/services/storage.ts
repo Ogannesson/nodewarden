@@ -17,6 +17,8 @@ import {
   getUserCount as countStoredUsers,
   saveUser as saveStoredUser,
   updateTotpLastCounter as updateStoredTotpLastCounter,
+  atomicConsumeRecoveryCode as atomicConsumeStoredRecoveryCode,
+  atomicRotateRecoveryCode as atomicRotateStoredRecoveryCode,
 } from './storage-user-repo';
 import {
   type AuditLogListOptions,
@@ -268,9 +270,32 @@ export class StorageService {
     return deleteStoredUserById(this.db, id);
   }
 
-  /** H3: Write back the matched TOTP counter for replay protection. */
-  async updateTotpLastCounter(userId: string, counter: number): Promise<void> {
-    await updateStoredTotpLastCounter(this.db, userId, counter);
+  /** H3: Atomically claim a TOTP counter for replay protection.
+   *  Returns true when the counter was written; false means a concurrent
+   *  request already claimed it (replay) and the caller must reject.
+   */
+  async updateTotpLastCounter(userId: string, counter: number): Promise<boolean> {
+    return updateStoredTotpLastCounter(this.db, userId, counter);
+  }
+
+  /** H3: Atomically consume a recovery code for TOTP disable (fail-closed).
+   *  Returns false when another concurrent request already consumed it.
+   */
+  async atomicConsumeRecoveryCode(userId: string, storedCode: string): Promise<boolean> {
+    return atomicConsumeStoredRecoveryCode(this.db, userId, storedCode);
+  }
+
+  /** H3: Atomically rotate a recovery code (account recovery flow, fail-closed).
+   *  Returns false when another concurrent request already rotated the code.
+   */
+  async atomicRotateRecoveryCode(
+    userId: string,
+    oldStoredCode: string,
+    newHashedCode: string,
+    newSecurityStamp: string,
+    updatedAt: string,
+  ): Promise<boolean> {
+    return atomicRotateStoredRecoveryCode(this.db, userId, oldStoredCode, newHashedCode, newSecurityStamp, updatedAt);
   }
 
   async createInvite(invite: Invite): Promise<void> {

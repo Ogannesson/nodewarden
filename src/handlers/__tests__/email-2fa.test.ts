@@ -106,6 +106,7 @@ import {
 } from '../../services/two-factor/email-provider';
 import { handleSendEmailLogin } from '../identity';
 import { handleGetEmailTwoFactor } from '../accounts';
+import { sha256Hex } from '../../utils/recovery-code';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -166,6 +167,7 @@ const fakeEnv = {
   DB: {} as D1Database,
   JWT_SECRET: 'test-secret-at-least-32-characters-long',
   NOTIFICATIONS_HUB: {} as DurableObjectNamespace,
+  BACKUP_TRANSFER_RUNNER: {} as DurableObjectNamespace,
   MFA_EMAIL_HTTP_ENDPOINT: 'http://localhost:9876/send',
   MFA_EMAIL_HTTP_AUTH: 'Bearer test-token',
   MFA_EMAIL_FROM: 'noreply@example.com',
@@ -175,6 +177,7 @@ const fakeEnvNoEmail = {
   DB: {} as D1Database,
   JWT_SECRET: 'test-secret-at-least-32-characters-long',
   NOTIFICATIONS_HUB: {} as DurableObjectNamespace,
+  BACKUP_TRANSFER_RUNNER: {} as DurableObjectNamespace,
   // No MFA_EMAIL_FROM / no backend configured
 };
 
@@ -288,58 +291,64 @@ describe('emailProvider.buildChallenge', () => {
 describe('emailProvider.verify', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  const baseCtx = {
-    user: makeUser(),
-    env: fakeEnv as typeof fakeEnv,
-    db: {} as D1Database,
-    twoFactorRows: [makeEnrollmentRow()],
-  };
+  // verify() now reads + increments the challenge atomically via
+  // db.prepare(UPDATE…RETURNING).all(), so the mock D1 returns the *post-increment*
+  // challenge row (or empty results to model "no challenge present").
+  function makeVerifyDb(postIncrementData: string | null): D1Database {
+    return {
+      prepare: () => ({
+        bind: () => ({
+          all: async () => ({ results: postIncrementData ? [{ data: postIncrementData }] : [] }),
+        }),
+      }),
+    } as unknown as D1Database;
+  }
+
+  // #8: challenge.code is stored hashed; verify compares hashRecoveryCode(token).
+  async function challengeData(opts: { code?: string; createdAt?: number; attempts?: number }): Promise<string> {
+    const hashed = await sha256Hex(opts.code ?? '123456');
+    return JSON.stringify({ code: hashed, createdAt: opts.createdAt ?? Date.now(), attempts: opts.attempts ?? 0 });
+  }
+
+  function ctxWith(db: D1Database) {
+    return { user: makeUser(), env: fakeEnv as typeof fakeEnv, db, twoFactorRows: [makeEnrollmentRow()] };
+  }
 
   it('returns false when no challenge row exists', async () => {
-    mockGetTwoFactor.mockResolvedValueOnce(null);
-    expect(await emailProvider.verify(baseCtx, '123456')).toBe(false);
+    expect(await emailProvider.verify(ctxWith(makeVerifyDb(null)), '123456')).toBe(false);
   });
 
   it('returns false and deletes challenge on TTL expiry', async () => {
-    const expiredRow = makeChallengeRow({ createdAt: Date.now() - (CODE_TTL_S + 60) * 1000 });
-    mockGetTwoFactor.mockResolvedValueOnce(expiredRow);
-    expect(await emailProvider.verify(baseCtx, '123456')).toBe(false);
+    const data = await challengeData({ createdAt: Date.now() - (CODE_TTL_S + 60) * 1000, attempts: 1 });
+    expect(await emailProvider.verify(ctxWith(makeVerifyDb(data)), '123456')).toBe(false);
     expect(mockDeleteTwoFactor).toHaveBeenCalledOnce();
   });
 
   it('returns false and deletes challenge when attempts exhausted', async () => {
-    const exhaustedRow = makeChallengeRow({ attempts: MAX_ATTEMPTS });
-    mockGetTwoFactor.mockResolvedValueOnce(exhaustedRow);
-    expect(await emailProvider.verify(baseCtx, 'wrong')).toBe(false);
+    // post-increment attempts already exceeds the limit
+    const data = await challengeData({ attempts: MAX_ATTEMPTS + 1 });
+    expect(await emailProvider.verify(ctxWith(makeVerifyDb(data)), 'wrong')).toBe(false);
     expect(mockDeleteTwoFactor).toHaveBeenCalledOnce();
   });
 
-  it('increments attempts on wrong code (not yet at limit)', async () => {
-    const row = makeChallengeRow({ code: '999999', attempts: 0 });
-    mockGetTwoFactor.mockResolvedValueOnce(row);
-    expect(await emailProvider.verify(baseCtx, '000000')).toBe(false);
-    // Should upsert with attempts=1, not delete.
+  it('returns false on wrong code (not yet at limit), without deleting', async () => {
+    // post-increment attempts below the limit, code hash mismatch
+    const data = await challengeData({ code: '999999', attempts: 1 });
+    expect(await emailProvider.verify(ctxWith(makeVerifyDb(data)), '000000')).toBe(false);
     expect(mockDeleteTwoFactor).not.toHaveBeenCalled();
-    expect(mockUpsertTwoFactor).toHaveBeenCalledOnce();
-    const upsertArg = (mockUpsertTwoFactor.mock.calls[0] as unknown[])[1] as TwoFactorRow;
-    const stored = JSON.parse(upsertArg.data) as { attempts: number };
-    expect(stored.attempts).toBe(1);
   });
 
-  it('deletes challenge on 3rd wrong attempt (max attempts)', async () => {
-    const row = makeChallengeRow({ code: '999999', attempts: MAX_ATTEMPTS - 1 });
-    mockGetTwoFactor.mockResolvedValueOnce(row);
-    expect(await emailProvider.verify(baseCtx, '000000')).toBe(false);
+  it('deletes challenge on the last wrong attempt (max attempts)', async () => {
+    // post-increment attempts === MAX → a wrong code triggers cleanup
+    const data = await challengeData({ code: '999999', attempts: MAX_ATTEMPTS });
+    expect(await emailProvider.verify(ctxWith(makeVerifyDb(data)), '000000')).toBe(false);
     expect(mockDeleteTwoFactor).toHaveBeenCalledOnce();
-    expect(mockUpsertTwoFactor).not.toHaveBeenCalled();
   });
 
   it('returns true and deletes challenge on correct code', async () => {
-    const row = makeChallengeRow({ code: '123456', attempts: 0 });
-    mockGetTwoFactor.mockResolvedValueOnce(row);
-    expect(await emailProvider.verify(baseCtx, '123456')).toBe(true);
+    const data = await challengeData({ code: '123456', attempts: 1 });
+    expect(await emailProvider.verify(ctxWith(makeVerifyDb(data)), '123456')).toBe(true);
     expect(mockDeleteTwoFactor).toHaveBeenCalledOnce();
-    expect(mockUpsertTwoFactor).not.toHaveBeenCalled();
   });
 });
 

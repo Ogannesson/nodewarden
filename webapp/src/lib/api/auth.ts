@@ -632,12 +632,16 @@ export async function getTotpStatus(authedFetch: AuthedFetch): Promise<{ enabled
  */
 export async function reEnableTotp(
   authedFetch: AuthedFetch,
-  masterPasswordHash: string
+  masterPasswordHash: string,
+  token?: string
 ): Promise<void> {
+  // #11: re-enabling TOTP now requires a live code (proof of current device possession).
+  // token is optional at the API layer until the SettingsPage UI collects it; the
+  // server rejects the request when token is missing.
   const resp = await authedFetch('/api/accounts/totp', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled: true, masterPasswordHash }),
+    body: JSON.stringify({ enabled: true, masterPasswordHash, token }),
   });
   if (!resp.ok) {
     const body = await parseJson<TokenError>(resp);
@@ -670,17 +674,22 @@ export async function reEnableWebAuthn(
  */
 export async function reEnableEmailTwoFactor(
   authedFetch: AuthedFetch,
-  masterPasswordHash: string
-): Promise<void> {
+  masterPasswordHash: string,
+  token?: string
+): Promise<{ codeSent: boolean }> {
+  // #11: two-phase — without a token the server sends a code to the enrolled address
+  // (phase 1); with the token it verifies and re-enables (phase 2).
   const resp = await authedFetch('/api/two-factor/email/reenable', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ masterPasswordHash }),
+    body: JSON.stringify(token ? { masterPasswordHash, token } : { masterPasswordHash }),
   });
   if (!resp.ok) {
     const errBody = await parseJson<TokenError>(resp);
     throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_reenable_email_mfa_failed')));
   }
+  const body = (await parseJson<{ codeSent?: boolean }>(resp)) || {};
+  return { codeSent: !!body.codeSent };
 }
 
 export async function getTotpRecoveryCode(
@@ -698,6 +707,17 @@ export async function getTotpRecoveryCode(
   }
   const body = (await parseJson<{ code?: string }>(resp)) || {};
   return String(body.code || '');
+}
+
+/**
+ * #10: one-time retrieval of the freshly-rotated recovery code after a recovery-code
+ * login. Returns the plaintext once (server deletes it on read), or null if none.
+ */
+export async function getRotatedRecoveryCode(authedFetch: AuthedFetch): Promise<string | null> {
+  const resp = await authedFetch('/api/two-factor/recover', { method: 'GET' });
+  if (!resp.ok) return null;
+  const body = (await parseJson<{ code?: string | null }>(resp)) || {};
+  return body.code ? String(body.code) : null;
 }
 
 export async function recoverTwoFactor(

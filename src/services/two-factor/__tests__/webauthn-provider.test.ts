@@ -159,7 +159,18 @@ function buildMockDb(challengeData: {
           }
           return { meta: { changes: 1 } };
         },
-        all: async () => ({ results: [] }),
+        all: async () => {
+          // popLoginChallenge now atomically consumes via DELETE … RETURNING data.
+          if (sql.includes('DELETE FROM two_factors') && sql.includes('RETURNING')) {
+            deleteCalledWith.push([args[0] as string, args[1] as number]);
+            const atype = args[1] as number;
+            if (atype === WEBAUTHN_LOGIN_CHALLENGE_ATYPE && challengeData !== null) {
+              return { results: [{ data: JSON.stringify(challengeData) }] };
+            }
+            return { results: [] };
+          }
+          return { results: [] };
+        },
       }),
     }),
   } as unknown as D1Database;

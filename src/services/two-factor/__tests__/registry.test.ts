@@ -113,11 +113,18 @@ describe('TotpTwoFactorProvider.buildChallenge', () => {
 });
 
 // Minimal DB mock for verify — totp-provider writes back totp_last_counter on success.
-function makeVerifyDb(): D1Database {
+function makeVerifyDb(storedCounter: number | null = null): D1Database {
   return {
     prepare: () => ({
-      bind: (..._args: unknown[]) => ({
-        run: () => Promise.resolve({ meta: { changes: 1 } }),
+      bind: (...args: unknown[]) => ({
+        // Simulate updateTotpLastCounter's conditional UPDATE:
+        //   WHERE totp_last_counter IS NULL OR totp_last_counter < <newCounter>
+        // → changes=0 (replay rejected) when the new counter is not strictly greater.
+        run: () => {
+          const newCounter = args[0] as number;
+          const changes = storedCounter === null || newCounter > storedCounter ? 1 : 0;
+          return Promise.resolve({ meta: { changes } });
+        },
       }),
     }),
   } as unknown as D1Database;
@@ -161,7 +168,7 @@ describe('TotpTwoFactorProvider.verify', () => {
     const p = getProvider(TwoFactorType.Authenticator, fakeEnv)!;
     // 这个 token 对应当前时间片（counter = nowCounter），已经被用过
     const usedToken = await computeHotp(TEST_SECRET, nowCounter);
-    const ctx = { user, env: fakeEnv, db: makeVerifyDb(), twoFactorRows: noRows };
+    const ctx = { user, env: fakeEnv, db: makeVerifyDb(nowCounter), twoFactorRows: noRows };
     // counter == totpLastCounter → 重放，应被拒绝
     expect(await p.verify(ctx, usedToken)).toBe(false);
   });

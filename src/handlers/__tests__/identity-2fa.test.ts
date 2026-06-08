@@ -72,6 +72,8 @@ const mockStorage = {
   deleteAllTwoFactorsByUserId: vi.fn(() => Promise.resolve(0)),
   // C4: called after successful login to clean up transient Email OTP challenge rows
   deleteTransientTwoFactorsByUserId: vi.fn(() => Promise.resolve(0)),
+  // H5: atomic recovery-code consume (identity.ts login flow) — fail-closed
+  atomicConsumeRecoveryCode: vi.fn(() => Promise.resolve(true)),
 };
 
 const mockAuth = {
@@ -164,6 +166,7 @@ const fakeEnv = {
   DB: fakeDb,
   JWT_SECRET: 'test-secret-at-least-32-characters-long',
   NOTIFICATIONS_HUB: {} as DurableObjectNamespace,
+  BACKUP_TRANSFER_RUNNER: {} as DurableObjectNamespace,
 };
 
 // -----------------------------------------------------------------------
@@ -417,14 +420,10 @@ describe('handleToken (password grant) – 恢复码（provider -1 / 8 / 100）'
     const resp = await handleToken(req, fakeEnv as unknown as typeof fakeEnv & { DB: D1Database });
 
     expect(resp.status).toBe(200);
-    // 用恢复码后应调用 saveUser（禁用 TOTP + 清除恢复码）
-    expect(mockStorage.saveUser).toHaveBeenCalled();
-    // 必修加固 #2：saveUser 时 totpSecret 必须已被清为 null（TOTP 真正被禁用）
-    const savedUser = (mockStorage.saveUser.mock.calls as unknown as Array<[import('../../types').User]>)[0][0];
-    expect(savedUser.totpSecret).toBeNull();
-    // 恢复码必须被清除为 null：token 端点无法把新明文码回传给客户端，清除可让用户
-    // 登录后经专用 recovery-code endpoint 重新生成可显示的新码（避免轮换成不可知 hash）。
-    expect(savedUser.totpRecoveryCode).toBeNull();
+    // H5 加固：改用原子消费，不再直接 saveUser；验证原子消费被调用
+    expect(mockStorage.atomicConsumeRecoveryCode).toHaveBeenCalledWith(user.id, RECOVERY_CODE);
+    // 原子消费已在 DB 层清除恢复码，不应再调用 saveUser
+    expect(mockStorage.saveUser).not.toHaveBeenCalled();
     // P1 加固：恢复码是账户级逃生门，必须同时清除 two_factors 表所有 provider 行
     expect(mockStorage.deleteAllTwoFactorsByUserId).toHaveBeenCalledWith(user.id);
     // 应撤销现有 refresh tokens
@@ -477,7 +476,27 @@ describe('handleToken (password grant) – 恢复码（provider -1 / 8 / 100）'
     const resp = await handleToken(req, fakeEnv as unknown as typeof fakeEnv & { DB: D1Database });
 
     expect(resp.status).toBe(400);
-    expect(mockStorage.saveUser).not.toHaveBeenCalled();
+    // 恢复码比对失败后不应发起原子消费（fail-closed：跳过 DB 写操作）
+    expect(mockStorage.atomicConsumeRecoveryCode).not.toHaveBeenCalled();
+  });
+
+  it('恢复码竞争消费（atomicConsumeRecoveryCode 返回 false）应返回 400 且不清除 two_factors/refresh tokens', async () => {
+    const user = makeActiveUser({
+      totpSecret: 'JBSWY3DPEHPK3PXP',
+      totpRecoveryCode: RECOVERY_CODE,
+    });
+    mockStorage.getUser.mockResolvedValue(user);
+    // 模拟 D1 WHERE predicate 匹配不到行（并发消费/changes===0）
+    mockStorage.atomicConsumeRecoveryCode.mockResolvedValueOnce(false);
+    const req = makeRequest(makePasswordBody({
+      twoFactorProvider: '-1',
+      twoFactorToken: RECOVERY_CODE,
+    }));
+    const resp = await handleToken(req, fakeEnv as unknown as typeof fakeEnv & { DB: D1Database });
+    expect(resp.status).toBe(400);
+    // fail-closed：原子消费失败后不得继续清除 two_factors 或撤销 refresh tokens
+    expect(mockStorage.deleteAllTwoFactorsByUserId).not.toHaveBeenCalled();
+    expect(mockStorage.deleteRefreshTokensByUserId).not.toHaveBeenCalled();
   });
 
   it('恢复码通过后不应颁发新的 remember token（twoFactorRemember=1 被忽略）', async () => {

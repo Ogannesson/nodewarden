@@ -97,7 +97,13 @@ export function bufferEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 type CborValue = number | Uint8Array | Map<number, CborValue> | CborValue[];
 
-function decodeCbor(buf: Uint8Array, offset: number = 0): { value: CborValue; nextOffset: number } {
+const CBOR_MAX_DEPTH = 32;
+
+function decodeCbor(buf: Uint8Array, offset: number = 0, depth: number = 0): { value: CborValue; nextOffset: number } {
+  // #9: bound recursion (attacker-nested CBOR would otherwise overflow the stack)
+  // and reject reads past the buffer end (truncated/crafted input).
+  if (depth > CBOR_MAX_DEPTH) throw new Error('CBOR: maximum nesting depth exceeded');
+  if (offset >= buf.length) throw new Error('CBOR: unexpected end of input');
   const first = buf[offset];
   const majorType = (first >> 5) & 0x07;
   const additionalInfo = first & 0x1f;
@@ -105,9 +111,16 @@ function decodeCbor(buf: Uint8Array, offset: number = 0): { value: CborValue; ne
 
   function readLength(addInfo: number): { len: number; offset: number } {
     if (addInfo <= 23) return { len: addInfo, offset };
-    if (addInfo === 24) return { len: buf[offset], offset: offset + 1 };
-    if (addInfo === 25) return { len: (buf[offset] << 8) | buf[offset + 1], offset: offset + 2 };
+    if (addInfo === 24) {
+      if (offset >= buf.length) throw new Error('CBOR: unexpected end of input');
+      return { len: buf[offset], offset: offset + 1 };
+    }
+    if (addInfo === 25) {
+      if (offset + 1 >= buf.length) throw new Error('CBOR: unexpected end of input');
+      return { len: (buf[offset] << 8) | buf[offset + 1], offset: offset + 2 };
+    }
     if (addInfo === 26) {
+      if (offset + 3 >= buf.length) throw new Error('CBOR: unexpected end of input');
       const l = ((buf[offset] << 24) | (buf[offset + 1] << 16) | (buf[offset + 2] << 8) | buf[offset + 3]) >>> 0;
       return { len: l, offset: offset + 4 };
     }
@@ -129,12 +142,14 @@ function decodeCbor(buf: Uint8Array, offset: number = 0): { value: CborValue; ne
   // Major type 2: byte string
   if (majorType === 2) {
     const { len, offset: o } = readLength(additionalInfo);
+    if (o + len > buf.length) throw new Error('CBOR: byte string out of bounds');
     return { value: buf.slice(o, o + len), nextOffset: o + len };
   }
 
   // Major type 3: text string — treated same as byte string for COSE keys
   if (majorType === 3) {
     const { len, offset: o } = readLength(additionalInfo);
+    if (o + len > buf.length) throw new Error('CBOR: text string out of bounds');
     return { value: buf.slice(o, o + len), nextOffset: o + len };
   }
 
@@ -144,7 +159,7 @@ function decodeCbor(buf: Uint8Array, offset: number = 0): { value: CborValue; ne
     let cur = o;
     const arr: CborValue[] = [];
     for (let i = 0; i < len; i++) {
-      const res = decodeCbor(buf, cur);
+      const res = decodeCbor(buf, cur, depth + 1);
       arr.push(res.value);
       cur = res.nextOffset;
     }
@@ -157,9 +172,9 @@ function decodeCbor(buf: Uint8Array, offset: number = 0): { value: CborValue; ne
     let cur = o;
     const map = new Map<number, CborValue>();
     for (let i = 0; i < len; i++) {
-      const keyRes = decodeCbor(buf, cur);
+      const keyRes = decodeCbor(buf, cur, depth + 1);
       cur = keyRes.nextOffset;
-      const valRes = decodeCbor(buf, cur);
+      const valRes = decodeCbor(buf, cur, depth + 1);
       cur = valRes.nextOffset;
       if (typeof keyRes.value === 'number') {
         map.set(keyRes.value, valRes.value);
@@ -247,9 +262,14 @@ export async function importCosePublicKey(coseKey: CoseKeyMap): Promise<{ key: C
   }
 
   if (alg === COSE_ALG_EDDSA) {
-    // kty=1 (OKP), crv=-8 (Ed25519), x=32-byte public key
+    // kty=1 (OKP), crv=6 (Ed25519), x=32-byte public key.
+    // #9: verify the curve before importing as Ed25519 — an Ed448 key (crv=7) would
+    // otherwise be silently fed to the Ed25519 importer.
+    const crv = coseKey.get(-1);
+    if (crv !== 6) throw new Error('COSE EdDSA: unsupported curve (expected Ed25519, crv=6)');
     const xBytes = coseKey.get(-2);
     if (!(xBytes instanceof Uint8Array)) throw new Error('COSE EdDSA: missing x (public key bytes)');
+    if (xBytes.length !== 32) throw new Error('COSE EdDSA: invalid Ed25519 public key length');
     const key = await crypto.subtle.importKey(
       'raw', xBytes,
       { name: 'Ed25519' },
@@ -290,7 +310,12 @@ export function derToRawEcdsaSignature(derSig: Uint8Array): Uint8Array {
   if (r[0] === 0x00) r = r.slice(1);
   if (s[0] === 0x00) s = s.slice(1);
 
-  // P-256: r and s are each 32 bytes; left-pad with zeros if shorter.
+  // P-256: r and s are each at most 32 bytes; left-pad with zeros if shorter.
+  // #9: reject over-long components — otherwise raw.set(x, 32 - len) would use a
+  // negative offset and throw a RangeError (request crash) on a crafted signature.
+  if (r.length > 32 || s.length > 32) {
+    throw new Error('ECDSA DER: r/s component longer than 32 bytes');
+  }
   const raw = new Uint8Array(64);
   raw.set(r, 32 - r.length);
   raw.set(s, 64 - s.length);
@@ -407,14 +432,29 @@ export function parseAuthenticatorData(authData: Uint8Array): ParsedAuthenticato
 }
 
 // ---------------------------------------------------------------------------
-// extractRpIdAndOrigin: derive rpId and expected origin from a request URL.
-// The server has no explicit DOMAIN config; we trust the incoming Host header
-// for WebAuthn rpId construction (consistent with how the Web Vault is served).
+// extractRpIdAndOrigin: read the WebAuthn relying-party id and expected origin
+// from server config (#7). We deliberately do NOT trust the incoming Host header —
+// a forged or misrouted Host must not be able to change the rpId/origin used for
+// credential binding/verification. Both WEBAUTHN_RP_ID and WEBAUTHN_ORIGIN must be
+// configured; if either is missing (or inconsistent) we throw and the caller
+// refuses WebAuthn entirely (no Host-header fallback).
 // ---------------------------------------------------------------------------
 
-export function extractRpIdAndOrigin(request: Request): { rpId: string; origin: string } {
-  const url = new URL(request.url);
-  const rpId = url.hostname;
-  const origin = `${url.protocol}//${url.host}`;
+export function extractRpIdAndOrigin(env: { WEBAUTHN_RP_ID?: string; WEBAUTHN_ORIGIN?: string }): { rpId: string; origin: string } {
+  const rpId = (env.WEBAUTHN_RP_ID ?? '').trim();
+  const origin = (env.WEBAUTHN_ORIGIN ?? '').trim();
+  if (!rpId || !origin) {
+    throw new Error('WebAuthn is not configured: WEBAUTHN_RP_ID and WEBAUTHN_ORIGIN must both be set');
+  }
+  let originHost: string;
+  try {
+    originHost = new URL(origin).hostname;
+  } catch {
+    throw new Error('WEBAUTHN_ORIGIN is not a valid URL');
+  }
+  // The configured origin's host must equal the rpId or be a subdomain of it.
+  if (originHost !== rpId && !originHost.endsWith(`.${rpId}`)) {
+    throw new Error('WEBAUTHN_ORIGIN host must equal or be a subdomain of WEBAUTHN_RP_ID');
+  }
   return { rpId, origin };
 }

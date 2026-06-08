@@ -7,7 +7,7 @@ import { jsonResponse, errorResponse } from '../utils/response';
 import { generateUUID } from '../utils/uuid';
 import { LIMITS } from '../config/limits';
 import { isTotpEnabled, verifyTotpToken } from '../utils/totp';
-import { createRecoveryCode, hashRecoveryCode, recoveryCodeEquals } from '../utils/recovery-code';
+import { createRecoveryCode, hashRecoveryCode, recoveryCodeEquals, sha256Hex } from '../utils/recovery-code';
 import { buildAccountKeys } from '../utils/user-decryption';
 import {
   getTwoFactor,
@@ -694,6 +694,16 @@ export async function handleSetTotpStatus(request: Request, env: Env, userId: st
     const validReEnable = await auth.verifyPassword(body.masterPasswordHash, user.masterPasswordHash, user.email);
     if (!validReEnable) return errorResponse('Invalid password', 400);
 
+    // #11: require a live TOTP code (proof of current device possession), not just
+    // the master password — re-enabling a factor must prove the user still holds it.
+    const reEnableToken = String(body.token ?? '').trim();
+    if (!reEnableToken) {
+      return errorResponse('A current TOTP code is required to re-enable TOTP', 400);
+    }
+    if ((await verifyTotpToken(user.totpSecret!, reEnableToken)) === null) {
+      return errorResponse('Invalid TOTP token', 400);
+    }
+
     user.totpEnabled = true;
     user.updatedAt = new Date().toISOString();
     await storage.saveUser(user);
@@ -845,23 +855,37 @@ export async function handleRecoverTwoFactor(request: Request, env: Env): Promis
   }
 
   // H4: recoveryCodeEquals is now async and returns { match, upgradedHash? }.
-  const rcVerify = await recoveryCodeEquals(recoveryCode, user.totpRecoveryCode);
+  // H5: capture stored code BEFORE comparison to close TOCTOU window.
+  const oldStoredCode = user.totpRecoveryCode;
+  const rcVerify = await recoveryCodeEquals(recoveryCode, oldStoredCode);
   if (!rcVerify.match) {
     await rateLimit.recordFailedLogin(recoverLimitKey);
     return errorResponse('Invalid credentials or recovery code', 400);
   }
 
   // Recovery code = destructive escape hatch: wipe ALL 2FA providers.
-  user.totpSecret = null;
-  user.totpEnabled = true; // reset to default; user will start fresh if they re-setup TOTP
   // Rotate the recovery code (one-time use): keep the plaintext to return to the
   // caller, persist only the hash. (Bug fix: the plaintext used to be discarded and
   // the hash returned, leaving the rotated recovery code unusable for the user.)
   const rotatedRecoveryCode = createRecoveryCode();
-  user.totpRecoveryCode = await hashRecoveryCode(rotatedRecoveryCode);
-  user.securityStamp = generateUUID();
-  user.updatedAt = new Date().toISOString();
-  await storage.saveUser(user);
+  const newHashedCode = await hashRecoveryCode(rotatedRecoveryCode);
+  const newSecurityStamp = generateUUID();
+  const updatedAt = new Date().toISOString();
+
+  // H5: atomic rotate — UPDATE ... SET totp_recovery_code = ?, totp_secret = NULL,
+  // totp_enabled = 1, security_stamp = ?, updated_at = ? WHERE totp_recovery_code = <old>.
+  // Returns false (changes === 0) when a concurrent request beat us to it.
+  const rotated = await storage.atomicRotateRecoveryCode(
+    user.id,
+    oldStoredCode!,
+    newHashedCode,
+    newSecurityStamp,
+    updatedAt,
+  );
+  if (!rotated) {
+    await rateLimit.recordFailedLogin(recoverLimitKey);
+    return errorResponse('Invalid credentials or recovery code', 400);
+  }
   // Also destroy WebAuthn and Email rows (full wipe, not just disable).
   await storage.deleteAllTwoFactorsByUserId(user.id);
   await storage.deleteRefreshTokensByUserId(user.id);
@@ -999,6 +1023,7 @@ import {
   renameCredential,
   disableAllWebAuthn,
   reenableAllWebAuthn,
+  webAuthnProvider,
 } from '../services/two-factor/webauthn-provider';
 
 /**
@@ -1041,7 +1066,7 @@ export async function handleGetWebAuthnChallenge(request: Request, env: Env, use
 
   const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
   const existingCredentials = listCredentials(twoFactorRows);
-  const options = await generateRegistrationChallenge(env.DB, user, request, existingCredentials);
+  const options = await generateRegistrationChallenge(env.DB, user, env, existingCredentials);
 
   // Surface enabled status so the front-end can distinguish:
   //   enabled=true, retainedCredentials>0  → active
@@ -1249,10 +1274,37 @@ export async function handleReenableWebAuthn(request: Request, env: Env, userId:
   const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
   if (!valid) return errorResponse('Invalid password', 400);
 
+  // #11: re-enabling WebAuthn must prove live possession of an existing credential,
+  // not just the master password. Credentials remain stored while disabled, so
+  // buildChallenge/verify work against them. Two-phase on this endpoint:
+  //   - no assertion -> phase 1: return a WebAuthn assertion challenge
+  //   - assertion    -> phase 2: verify it, then re-enable
+  const reenableRows = await storage.getTwoFactorsByUserId(userId);
+  const webAuthnCtx = { user, env, db: env.DB, twoFactorRows: reenableRows, request };
+
+  const assertion = body.token ?? body.assertion ?? body.deviceResponse;
+  if (!assertion) {
+    let options: Record<string, unknown>;
+    try {
+      options = (await webAuthnProvider.buildChallenge(webAuthnCtx)) as Record<string, unknown>;
+    } catch {
+      return errorResponse('WebAuthn is not available or not configured', 400);
+    }
+    return jsonResponse({ ...options, object: 'twoFactorWebAuthnReenableChallenge' });
+  }
+
+  const assertionJson = typeof assertion === 'string' ? assertion : JSON.stringify(assertion);
+  const assertionVerified = await webAuthnProvider.verify(webAuthnCtx, assertionJson);
+  if (!assertionVerified) {
+    return errorResponse('WebAuthn verification failed', 400);
+  }
+
   const reenabled = await reenableAllWebAuthn(env.DB, userId);
   if (!reenabled) {
     return errorResponse('No retained WebAuthn credentials found. Please register a new credential.', 400);
   }
+  await storage.deleteRefreshTokensByUserId(userId);
+  AuthService.invalidateUserCache(userId);
 
   await safeWriteAuditEvent(env, {
     actorUserId: userId,
@@ -1393,7 +1445,9 @@ export async function handleSendEmailSetup(request: Request, env: Env, userId: s
     userId,
     atype: EMAIL_LOGIN_CHALLENGE_ATYPE,
     enabled: true,
-    data: JSON.stringify({ code, createdAt: Date.now(), attempts: 0 }),
+    // #8: store the OTP hashed (plaintext is only used to send the email below).
+    // #12: bind the challenge to the target email so a code sent to A cannot enroll B.
+    data: JSON.stringify({ code: await sha256Hex(code), createdAt: Date.now(), attempts: 0, targetEmail }),
     lastUsed: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -1467,7 +1521,7 @@ export async function handleEnableEmailTwoFactor(request: Request, env: Env, use
   const challengeRow = await getTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
   if (!challengeRow) return errorResponse('No pending verification code. Please request a new code.', 400);
 
-  const challenge = JSON.parse(challengeRow.data) as { code: string; createdAt: number; attempts: number };
+  const challenge = JSON.parse(challengeRow.data) as { code: string; createdAt: number; attempts: number; targetEmail?: string };
   const ageMs = Date.now() - challenge.createdAt;
   if (ageMs > CODE_TTL_S * 1000) {
     await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
@@ -1477,7 +1531,7 @@ export async function handleEnableEmailTwoFactor(request: Request, env: Env, use
   // Constant-time comparison.
   const enc = new TextEncoder();
   const { timingSafeEqual } = await import('../utils/passkey');
-  const match = await timingSafeEqual(enc.encode(token), enc.encode(challenge.code));
+  const match = await timingSafeEqual(enc.encode(await sha256Hex(token)), enc.encode(challenge.code));
   if (!match) {
     const newAttempts = challenge.attempts + 1;
     if (newAttempts >= 3) {
@@ -1490,6 +1544,13 @@ export async function handleEnableEmailTwoFactor(request: Request, env: Env, use
       });
     }
     return errorResponse('Invalid verification code', 400);
+  }
+
+  // #12: bind the OTP to the address it was sent to — reject enrolling a different
+  // email than the one that received the code (or any legacy challenge without targetEmail).
+  if (!challenge.targetEmail || challenge.targetEmail !== targetEmail) {
+    await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    return errorResponse('Email does not match the address the code was sent to', 400);
   }
 
   // Delete the setup challenge and enroll.
@@ -1631,6 +1692,72 @@ export async function handleReenableEmailTwoFactor(request: Request, env: Env, u
   if (!enrollmentRow) {
     return errorResponse('Email 2FA is not configured. Please set it up first.', 400);
   }
+  const enrollment = JSON.parse(enrollmentRow.data) as { email: string };
+
+  // #11: re-enabling Email 2FA must prove live control of the enrolled address,
+  // not just the master password. Two-phase on this same endpoint:
+  //   - no token  -> phase 1: send a fresh code to the enrolled address
+  //   - token     -> phase 2: verify the code, then re-enable
+  const token = String(body.token ?? '').trim();
+
+  if (!token) {
+    const code = generateNumericCode();
+    await upsertTwoFactor(env.DB, {
+      userId,
+      atype: EMAIL_LOGIN_CHALLENGE_ATYPE,
+      enabled: true,
+      // #8 hashed code, #12 bound to the enrolled address.
+      data: JSON.stringify({ code: await sha256Hex(code), createdAt: Date.now(), attempts: 0, targetEmail: enrollment.email }),
+      lastUsed: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const sender = buildEmailSenderFromEnv(env);
+    if (!sender) return errorResponse('Email sender not configured', 503);
+    try {
+      await sender.send({
+        to: enrollment.email,
+        subject: 'Your NodeWarden verification code',
+        text: [
+          `Your NodeWarden verification code is: ${code}`,
+          '',
+          `This code expires in ${CODE_TTL_S / 60} minutes and can only be used once.`,
+        ].join('\n'),
+      });
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ Message: `Failed to send verification email: ${err instanceof Error ? err.message : String(err)}` }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return jsonResponse({ codeSent: true, email: maskEmail(enrollment.email), object: 'twoFactorEmailReenableChallenge' });
+  }
+
+  // Phase 2: verify the emailed code against the bound challenge.
+  const challengeRow = await getTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+  if (!challengeRow) return errorResponse('No pending verification code. Please request a new code.', 400);
+  const challenge = JSON.parse(challengeRow.data) as { code: string; createdAt: number; attempts: number; targetEmail?: string };
+  if (Date.now() - challenge.createdAt > CODE_TTL_S * 1000) {
+    await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    return errorResponse('Verification code has expired. Please request a new code.', 400);
+  }
+  const enc = new TextEncoder();
+  const { timingSafeEqual } = await import('../utils/passkey');
+  const codeMatch = await timingSafeEqual(enc.encode(await sha256Hex(token)), enc.encode(challenge.code));
+  if (!codeMatch) {
+    const newAttempts = challenge.attempts + 1;
+    if (newAttempts >= 3) {
+      await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    } else {
+      await upsertTwoFactor(env.DB, { ...challengeRow, data: JSON.stringify({ ...challenge, attempts: newAttempts }), updatedAt: new Date().toISOString() });
+    }
+    return errorResponse('Invalid verification code', 400);
+  }
+  if (challenge.targetEmail !== enrollment.email) {
+    await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    return errorResponse('Verification target mismatch', 400);
+  }
+  await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
 
   // Restore enabled flag — enrollment data (email address) is already there.
   await upsertTwoFactor(env.DB, {
@@ -1638,8 +1765,9 @@ export async function handleReenableEmailTwoFactor(request: Request, env: Env, u
     enabled: true,
     updatedAt: new Date().toISOString(),
   });
+  await storage.deleteRefreshTokensByUserId(userId);
+  AuthService.invalidateUserCache(userId);
 
-  const enrollment = JSON.parse(enrollmentRow.data) as { email: string };
   await safeWriteAuditEvent(env, {
     actorUserId: userId,
     action: 'account.email2fa.reenable',

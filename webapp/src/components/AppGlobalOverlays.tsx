@@ -28,6 +28,10 @@ interface AppGlobalOverlaysProps {
   onCancelTotp: () => void;
   onUseRecoveryCode: () => void;
   totpSubmitting: boolean;
+  /** Whether Email (provider 1) is available as a fallback from the TOTP dialog */
+  totpHasEmailFallback?: boolean;
+  /** Switch from TOTP dialog to Email OTP dialog */
+  onSwitchFromTotpToEmail?: () => void;
   disableTotpOpen: boolean;
   disableTotpPassword: string;
   onDisableTotpPasswordChange: (value: string) => void;
@@ -89,6 +93,11 @@ export default function AppGlobalOverlays(props: AppGlobalOverlaysProps) {
         afterActions={(
           <div className="dialog-extra">
             <div className="dialog-divider" />
+            {props.totpHasEmailFallback && props.onSwitchFromTotpToEmail && (
+              <button type="button" className="btn btn-secondary dialog-btn" disabled={props.totpSubmitting} onClick={props.onSwitchFromTotpToEmail}>
+                {t('txt_use_email_code')}
+              </button>
+            )}
             <button type="button" className="btn btn-secondary dialog-btn" disabled={props.totpSubmitting} onClick={props.onUseRecoveryCode}>
               {t('txt_use_recovery_code')}
             </button>

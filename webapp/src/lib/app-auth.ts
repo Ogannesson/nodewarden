@@ -16,10 +16,17 @@ import { readInviteCodeFromUrl } from '@/lib/app-support';
 import { t, translateServerError } from '@/lib/i18n';
 import type { AppPhase, Profile, SessionState, TokenSuccess, WebBootstrapResponse } from '@/lib/types';
 
+/** Two-factor provider key constants (Bitwarden-compatible string representation). */
+export const PROVIDER_TOTP = '0';
+export const PROVIDER_EMAIL = '1';
+export const PROVIDER_WEBAUTHN = '7';
+
 export interface PendingTotp {
   email: string;
   passwordHash: string;
   masterKey: Uint8Array;
+  /** Whether Email (provider 1) is also available as a fallback from the TOTP dialog. */
+  hasEmailFallback?: boolean;
 }
 
 export interface WebAuthnChallenge {
@@ -361,8 +368,8 @@ export async function performPasswordLogin(
     const providerKeys = (Array.isArray(providers) ? providers : []).map((x) => String(x));
 
     // Prefer WebAuthn (provider 7) when the server advertises it.
-    if (providerKeys.includes('7') && providers2['7']) {
-      const p7 = providers2['7'] as Record<string, unknown>;
+    if (providerKeys.includes(PROVIDER_WEBAUTHN) && providers2[PROVIDER_WEBAUTHN]) {
+      const p7 = providers2[PROVIDER_WEBAUTHN] as Record<string, unknown>;
       const webAuthnChallenge: WebAuthnChallenge = {
         challenge: String(p7['challenge'] ?? ''),
         rpId: typeof p7['rpId'] === 'string' ? p7['rpId'] : undefined,
@@ -378,16 +385,18 @@ export async function performPasswordLogin(
           email: normalizedEmail,
           passwordHash: derived.hash,
           masterKey: derived.masterKey,
-          hasTotpFallback: providerKeys.includes('0'),
-          hasEmailFallback: providerKeys.includes('1'),
+          hasTotpFallback: providerKeys.includes(PROVIDER_TOTP),
+          hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
           webAuthnChallenge,
         },
       };
     }
 
-    // Email 2FA (provider 1) — only triggered when no WebAuthn is available.
-    if (providerKeys.includes('1') && !providerKeys.includes('0')) {
-      const p1 = providers2['1'] as Record<string, unknown> | null | undefined;
+    // Email 2FA (provider 1) — only triggered when no WebAuthn or TOTP is available.
+    // If the user has BOTH TOTP and Email enabled, they land in the TOTP branch below
+    // and can switch to email from the TOTP dialog (via hasEmailFallback).
+    if (providerKeys.includes(PROVIDER_EMAIL) && !providerKeys.includes(PROVIDER_TOTP)) {
+      const p1 = providers2[PROVIDER_EMAIL] as Record<string, unknown> | null | undefined;
       // Server returns TwoFactorProviders2["1"] = { Email: "u***@e***.com" } (capital E,
       // Bitwarden-compatible). Accept both casings defensively so the masked address shows.
       const maskedEmail = (typeof p1?.['Email'] === 'string' ? p1['Email']
@@ -411,6 +420,8 @@ export async function performPasswordLogin(
         email: normalizedEmail,
         passwordHash: derived.hash,
         masterKey: derived.masterKey,
+        // When the user has email 2FA as well, surface a "switch to email" button in the UI.
+        hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
       },
     };
   }
@@ -539,8 +550,8 @@ export async function performUnlock(
     // legacy numeric array [0, 7] and current string array ["0", "7"].
     const providerKeys = (Array.isArray(providers) ? providers : []).map((x) => String(x));
 
-    if (providerKeys.includes('7') && providers2['7']) {
-      const p7 = providers2['7'] as Record<string, unknown>;
+    if (providerKeys.includes(PROVIDER_WEBAUTHN) && providers2[PROVIDER_WEBAUTHN]) {
+      const p7 = providers2[PROVIDER_WEBAUTHN] as Record<string, unknown>;
       const webAuthnChallenge: WebAuthnChallenge = {
         challenge: String(p7['challenge'] ?? ''),
         rpId: typeof p7['rpId'] === 'string' ? p7['rpId'] : undefined,
@@ -556,16 +567,18 @@ export async function performUnlock(
           email: normalizedEmail,
           passwordHash: derived.hash,
           masterKey: derived.masterKey,
-          hasTotpFallback: providerKeys.includes('0'),
-          hasEmailFallback: providerKeys.includes('1'),
+          hasTotpFallback: providerKeys.includes(PROVIDER_TOTP),
+          hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
           webAuthnChallenge,
         },
       };
     }
 
-    // Email 2FA (provider 1) — only triggered when no WebAuthn is available.
-    if (providerKeys.includes('1') && !providerKeys.includes('0')) {
-      const p1 = providers2['1'] as Record<string, unknown> | null | undefined;
+    // Email 2FA (provider 1) — only triggered when no WebAuthn or TOTP is available.
+    // If the user has BOTH TOTP and Email enabled, they land in the TOTP branch below
+    // and can switch to email from the TOTP dialog (via hasEmailFallback).
+    if (providerKeys.includes(PROVIDER_EMAIL) && !providerKeys.includes(PROVIDER_TOTP)) {
+      const p1 = providers2[PROVIDER_EMAIL] as Record<string, unknown> | null | undefined;
       // Server returns TwoFactorProviders2["1"] = { Email: "u***@e***.com" } (capital E,
       // Bitwarden-compatible). Accept both casings defensively so the masked address shows.
       const maskedEmail = (typeof p1?.['Email'] === 'string' ? p1['Email']
@@ -588,6 +601,8 @@ export async function performUnlock(
         email: normalizedEmail,
         passwordHash: derived.hash,
         masterKey: derived.masterKey,
+        // When the user has email 2FA as well, surface a "switch to email" button in the UI.
+        hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
       },
     };
   }

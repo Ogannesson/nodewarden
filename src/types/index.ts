@@ -20,6 +20,13 @@ export interface Env {
   // Optional fallback for attachment/send file storage (no credit card required).
   ATTACHMENTS_KV?: KVNamespace;
   JWT_SECRET: string;
+  // WebAuthn relying-party config (#7 — no Host-header fallback). BOTH must be set
+  // for WebAuthn registration/authentication; if either is missing the server
+  // refuses WebAuthn (extractRpIdAndOrigin throws).
+  //   WEBAUTHN_RP_ID:  registrable domain, e.g. "vault.example.com"
+  //   WEBAUTHN_ORIGIN: full origin,        e.g. "https://vault.example.com"
+  WEBAUTHN_RP_ID?: string;
+  WEBAUTHN_ORIGIN?: string;
   // Email 2FA (P2). At minimum MFA_EMAIL_FROM plus one sending backend must be set.
   // If absent, isEmailSenderConfigured() returns false and Email 2FA is silently omitted.
   MFA_EMAIL_FROM?: string;

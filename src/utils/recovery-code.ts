@@ -66,6 +66,19 @@ export async function hashRecoveryCode(rawCode: string): Promise<string> {
     .join('');
 }
 
+/**
+ * SHA-256 hex of the raw input WITHOUT recovery-code normalisation. Use this for
+ * hashing numeric secrets such as email OTP codes: normalizeRecoveryCode() strips
+ * non-base32 characters (0/1/8/9), which would collide distinct numeric codes and
+ * make wrong codes compare equal. Every character of the input is significant here.
+ */
+export async function sha256Hex(input: string): Promise<string> {
+  const hashBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(hashBuf))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 /** True if a stored value looks like a SHA-256 hex digest (64 lowercase hex chars). */
 function isHashedFormat(stored: string): boolean {
   return /^[0-9a-f]{64}$/.test(stored);

@@ -428,6 +428,8 @@ export async function handlePublicRoute(
 
   // Email 2FA: unauthenticated send-email-login (2025.5+ clients trigger this during login challenge)
   if (path === '/api/two-factor/send-email-login' && method === 'POST') {
+    const blocked = await enforcePublicRateLimit('public-sensitive', LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
+    if (blocked) return blocked;
     return handleSendEmailLogin(request, env);
   }
 
