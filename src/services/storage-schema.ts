@@ -119,6 +119,26 @@ const SCHEMA_STATEMENTS: readonly string[] = [
 
   'CREATE TABLE IF NOT EXISTS used_attachment_download_tokens (' +
   'jti TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)',
+
+  // two_factors: multi-provider MFA storage (P0 – see docs/MFA-RESEARCH.md §4.1).
+  // TOTP stays in users.totp_secret (conservative dual-track); this table is for
+  // WebAuthn (atype=7), Email (atype=1), YubiKey (atype=3), etc.
+  'CREATE TABLE IF NOT EXISTS two_factors (' +
+  'user_id TEXT NOT NULL, atype INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, ' +
+  'data TEXT NOT NULL DEFAULT \'{}\', last_used INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ' +
+  'PRIMARY KEY (user_id, atype), ' +
+  'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)',
+  'CREATE INDEX IF NOT EXISTS idx_two_factors_user ON two_factors(user_id)',
+
+  // Migration 0003: reversible TOTP disable — preserve totp_secret, just flip this flag.
+  // DEFAULT 1 means all existing users with a totp_secret remain active after upgrade.
+  'ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 1',
+
+  // Migration 0004: TOTP replay protection — last-used counter tracking.
+  // NULL = no authenticated TOTP login yet (all counters accepted on first use).
+  // On each successful TOTP login the matched counter value is written here; subsequent
+  // attempts with counter ≤ stored value are rejected (~90-second replay window closed).
+  'ALTER TABLE users ADD COLUMN totp_last_counter INTEGER',
 ];
 
 async function executeSchemaStatement(db: D1Database, statement: string): Promise<void> {

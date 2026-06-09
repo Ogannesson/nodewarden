@@ -26,7 +26,8 @@ type BackupTableName =
   | 'user_revisions'
   | 'folders'
   | 'ciphers'
-  | 'attachments';
+  | 'attachments'
+  | 'two_factors';
 
 const BACKUP_TABLES: BackupTableName[] = [
   'config',
@@ -36,6 +37,7 @@ const BACKUP_TABLES: BackupTableName[] = [
   'folders',
   'ciphers',
   'attachments',
+  'two_factors',
 ];
 
 function shadowTableName(table: BackupTableName): string {
@@ -53,6 +55,7 @@ export interface BackupImportResultBody {
     ciphers: number;
     attachments: number;
     attachmentFiles: number;
+    twoFactors: number;
   };
   skipped: {
     reason: string | null;
@@ -166,6 +169,7 @@ async function ensureImportTargetIsFresh(db: D1Database): Promise<void> {
 function buildResetImportTargetStatements(db: D1Database): D1PreparedStatement[] {
   return [
     'DELETE FROM attachments',
+    'DELETE FROM two_factors',
     'DELETE FROM ciphers',
     'DELETE FROM folders',
     'DELETE FROM domain_settings',
@@ -284,6 +288,21 @@ async function prepareImportedConfigRows(
 }
 
 async function importPreparedBackupRows(db: D1Database, payload: BackupPayload['db'], env: Env): Promise<BackupPayload['db']> {
+  // H6: two_factors was previously omitted from preparedDb, causing the importBackupRows
+  // guard (`payload.two_factors && ...`) to always be falsy → MFA rows silently dropped.
+  // Fix: include two_factors in preparedDb, filtering out transient challenge rows
+  // (atype >= 1000) to prevent injection of live OTP challenges into imported data.
+  const rawTwoFactors = cloneRows(payload.two_factors || []);
+  const safeTwoFactors = rawTwoFactors.filter((row) => {
+    const atype = Number(row.atype);
+    if (atype >= 1000) {
+      // Reject transient challenge rows — they have no meaning outside the originating
+      // session and must not be imported (prevents pre-placed challenge injection).
+      return false;
+    }
+    return true;
+  });
+
   const preparedDb: BackupPayload['db'] = {
     config: await prepareImportedConfigRows(env, payload.config || [], payload.users || []),
     users: cloneRows(payload.users || []).map((row) => ({
@@ -298,6 +317,8 @@ async function importPreparedBackupRows(db: D1Database, payload: BackupPayload['
       archived_at: row.archived_at ?? null,
     })),
     attachments: cloneRows(payload.attachments || []),
+    // H6: two_factors now properly included (was missing, causing MFA to be silently dropped).
+    two_factors: safeTwoFactors,
   };
   await importBackupRows(db, preparedDb, true);
   return preparedDb;
@@ -609,8 +630,11 @@ async function importBackupRows(db: D1Database, payload: BackupPayload['db'], us
     buildInsertStatements(
       db,
       tableName('users'),
-      ['id', 'email', 'name', 'master_password_hint', 'master_password_hash', 'key', 'private_key', 'public_key', 'kdf_type', 'kdf_iterations', 'kdf_memory', 'kdf_parallelism', 'security_stamp', 'role', 'status', 'verify_devices', 'totp_secret', 'totp_recovery_code', 'created_at', 'updated_at'],
-      payload.users || []
+      ['id', 'email', 'name', 'master_password_hint', 'master_password_hash', 'key', 'private_key', 'public_key', 'kdf_type', 'kdf_iterations', 'kdf_memory', 'kdf_parallelism', 'security_stamp', 'role', 'status', 'verify_devices', 'totp_secret', 'totp_enabled', 'totp_recovery_code', 'created_at', 'updated_at'],
+      // Backfill totp_enabled=1 for rows from older backups that predate the column.
+      // The column is NOT NULL DEFAULT 1, so null would cause a constraint violation.
+      // Defaulting to 1 preserves the existing TOTP activation state for migrated users.
+      (payload.users || []).map((row) => row.totp_enabled == null ? { ...row, totp_enabled: 1 } : row)
     )
   );
   await runInsertBatch(
@@ -649,6 +673,19 @@ async function importBackupRows(db: D1Database, payload: BackupPayload['db'], us
     tableName('attachments'),
     buildInsertStatements(db, tableName('attachments'), ['id', 'cipher_id', 'file_name', 'size', 'size_name', 'key'], payload.attachments || [])
   );
+  // two_factors is optional in the payload (older backups won't have it).
+  if (payload.two_factors && payload.two_factors.length > 0) {
+    await runInsertBatch(
+      db,
+      tableName('two_factors'),
+      buildInsertStatements(
+        db,
+        tableName('two_factors'),
+        ['user_id', 'atype', 'enabled', 'data', 'last_used', 'created_at', 'updated_at'],
+        payload.two_factors
+      )
+    );
+  }
 }
 
 export async function importBackupArchiveBytes(
@@ -700,6 +737,8 @@ export async function importBackupArchiveBytes(
       folders: (db.folders || []).length,
       ciphers: (db.ciphers || []).length,
       attachments: (db.attachments || []).length,
+      // H6: Include two_factors in count validation so MFA row imports are verified.
+      two_factors: (db.two_factors || []).length,
     });
 
     await progress?.({
@@ -722,6 +761,8 @@ export async function importBackupArchiveBytes(
       folders: (db.folders || []).length,
       ciphers: (db.ciphers || []).length,
       attachments: restored.restoredAttachments.length,
+      // H6: two_factors rows count verified after file restoration step.
+      two_factors: (db.two_factors || []).length,
     });
     await progress?.({
       source: 'local',
@@ -763,6 +804,7 @@ export async function importBackupArchiveBytes(
           ciphers: (db.ciphers || []).length,
           attachments: restored.restoredAttachments.length,
           attachmentFiles: restored.imported,
+          twoFactors: (db.two_factors || []).length,
         },
         skipped: {
           reason: restored.skipped.reason || prepared.skipped.reason,
@@ -838,6 +880,8 @@ export async function importRemoteBackupArchiveBytes(
       folders: (db.folders || []).length,
       ciphers: (db.ciphers || []).length,
       attachments: (db.attachments || []).length,
+      // H6: Include two_factors in count validation so MFA row imports are verified.
+      two_factors: (db.two_factors || []).length,
     });
 
     await progress?.({
@@ -860,6 +904,8 @@ export async function importRemoteBackupArchiveBytes(
       folders: (db.folders || []).length,
       ciphers: (db.ciphers || []).length,
       attachments: restored.restoredAttachments.length,
+      // H6: two_factors rows count verified after file restoration step.
+      two_factors: (db.two_factors || []).length,
     });
     await progress?.({
       source: 'remote',
@@ -907,6 +953,7 @@ export async function importRemoteBackupArchiveBytes(
           ciphers: (db.ciphers || []).length,
           attachments: restored.restoredAttachments.length,
           attachmentFiles: restored.imported,
+          twoFactors: (db.two_factors || []).length,
         },
         skipped: {
           reason: finalSkippedReason,

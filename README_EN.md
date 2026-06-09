@@ -46,7 +46,7 @@
 | TOTP / Steam TOTP | ✅ | ✅ | Includes `steam://` support |
 | Multi-user | ✅ | ✅ | Invite-based registration |
 | Organizations / Collections / Member roles | ✅ | ❌ | Not implemented |
-| Login 2FA | ✅ | ⚠️ Partial | Currently only user-level TOTP |
+| Login 2FA | ✅ | ✅ | TOTP, WebAuthn/FIDO2 security keys, Email OTP (Cloudflare or custom HTTP channel) |
 | SSO / SCIM / Enterprise directory | ✅ | ❌ | Not implemented |
 
 ---
@@ -130,6 +130,20 @@ Current supported export formats include:
 - ZIP export with attachments
 - NodeWarden JSON variants
 - Full manual instance export from the backup center
+
+---
+
+## Two-Factor Authentication (2FA)
+
+NodeWarden supports three second-factor methods, manageable in the Web Vault under **Settings → Two-step Login**:
+
+| Method | Requirements | Description |
+|---|---|---|
+| **TOTP / Authenticator App** | No extra config | Scan a QR code with Google Authenticator, 1Password, Bitwarden, etc. |
+| **WebAuthn / FIDO2 Security Key** | No extra config | YubiKey, Touch ID, Windows Hello, or any FIDO2 authenticator |
+| **Email OTP** | Either: ① Cloudflare Email binding (`[[send_email]]` + `MFA_EMAIL_FROM`) or ② generic HTTP endpoint (`MFA_EMAIL_HTTP_ENDPOINT` + `MFA_EMAIL_HTTP_AUTH` + `MFA_EMAIL_FROM`) — see `.dev.vars.example` | A 6-digit code sent to the registered email; valid for 10 minutes |
+
+All three methods can be active simultaneously. Every account has a **recovery code** that can be used to disable all 2FA methods as an emergency escape hatch.
 
 ---
 

@@ -8,7 +8,7 @@ import {
   handleDownloadSendFile,
 } from './handlers/sends';
 import { handleKnownDevice } from './handlers/devices';
-import { handleToken, handlePrelogin, handleRevocation } from './handlers/identity';
+import { handleToken, handlePrelogin, handleRevocation, handleSendEmailLogin } from './handlers/identity';
 import {
   handleRegister,
   handleGetPasswordHint,
@@ -424,6 +424,13 @@ export async function handlePublicRoute(
 
   if ((path === '/identity/accounts/recover-2fa' || path === '/api/accounts/recover-2fa') && method === 'POST') {
     return handleRecoverTwoFactor(request, env);
+  }
+
+  // Email 2FA: unauthenticated send-email-login (2025.5+ clients trigger this during login challenge)
+  if (path === '/api/two-factor/send-email-login' && method === 'POST') {
+    const blocked = await enforcePublicRateLimit('public-sensitive', LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
+    if (blocked) return blocked;
+    return handleSendEmailLogin(request, env);
   }
 
   if (path === '/api/accounts/password-hint' && method === 'POST') {

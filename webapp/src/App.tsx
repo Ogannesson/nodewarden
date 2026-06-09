@@ -21,6 +21,14 @@ import {
   getTotpStatus,
   saveSession,
   stripProfileSecrets,
+  getWebAuthnChallenge,
+  getEmailTwoFactorStatus,
+  reEnableTotp,
+  getWebAuthnReenableChallenge,
+  reEnableWebAuthn,
+  reEnableEmailTwoFactor,
+  sendEmailSetupCode,
+  enableEmailTwoFactor,
 } from '@/lib/api/auth';
 import { clearAuditLogs, getAuditLogSettings, listAdminInvites, listAdminUsers, listAuditLogs, saveAuditLogSettings, type AuditLogFilters } from '@/lib/api/admin';
 import { getDomainRules, saveDomainRules } from '@/lib/api/domains';
@@ -41,11 +49,16 @@ import {
   performRecoverTwoFactorLogin,
   performRegistration,
   performTotpLogin,
+  performEmailLogin,
+  performWebAuthnLogin,
   hydrateLockedSession,
   performUnlock,
   type JwtUnsafeReason,
   type PendingTotp,
+  type PendingEmail,
+  type PendingWebAuthn,
 } from '@/lib/app-auth';
+import { performWebAuthnAssertion, deriveLoginHash, sendEmailLoginCode } from '@/lib/api/auth';
 import useAccountSecurityActions from '@/hooks/useAccountSecurityActions';
 import useAdminActions from '@/hooks/useAdminActions';
 import useBackupActions from '@/hooks/useBackupActions';
@@ -200,6 +213,15 @@ export default function App() {
   const [unlockPassword, setUnlockPassword] = useState('');
   const [pendingTotp, setPendingTotp] = useState<PendingTotp | null>(null);
   const [pendingTotpMode, setPendingTotpMode] = useState<'login' | 'unlock' | null>(null);
+  const [pendingEmail, setPendingEmail] = useState<PendingEmail | null>(null);
+  const [pendingEmailMode, setPendingEmailMode] = useState<'login' | 'unlock' | null>(null);
+  const [emailOtpCode, setEmailOtpCode] = useState('');
+  const [emailOtpRememberDevice, setEmailOtpRememberDevice] = useState(true);
+  const [emailOtpSubmitting, setEmailOtpSubmitting] = useState(false);
+  const [emailOtpResending, setEmailOtpResending] = useState(false);
+  const [pendingWebAuthn, setPendingWebAuthn] = useState<PendingWebAuthn | null>(null);
+  const [pendingWebAuthnMode, setPendingWebAuthnMode] = useState<'login' | 'unlock' | null>(null);
+  const [webAuthnSubmitting, setWebAuthnSubmitting] = useState(false);
   const [totpCode, setTotpCode] = useState('');
   const [rememberDevice, setRememberDevice] = useState(true);
   const [totpSubmitting, setTotpSubmitting] = useState(false);
@@ -478,6 +500,13 @@ export default function App() {
     setUnlockPreparing(false);
     setPendingTotp(null);
     setPendingTotpMode(null);
+    setPendingEmail(null);
+    setPendingEmailMode(null);
+    setEmailOtpCode('');
+    setEmailOtpResending(false);
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+    setWebAuthnSubmitting(false);
     setTotpCode('');
     setUnlockPassword('');
     setPhase('app');
@@ -525,11 +554,140 @@ export default function App() {
         setRememberDevice(true);
         return;
       }
+      if (result.kind === 'email') {
+        setPendingEmail(result.pendingEmail);
+        setPendingEmailMode('login');
+        setEmailOtpCode('');
+        setEmailOtpRememberDevice(true);
+        return;
+      }
+      if (result.kind === 'webauthn') {
+        setPendingWebAuthn(result.pendingWebAuthn);
+        setPendingWebAuthnMode('login');
+        return;
+      }
       pushToast('error', result.message || t('txt_login_failed'));
     } catch (error) {
       pushToast('error', error instanceof Error ? error.message : t('txt_login_failed'));
     } finally {
       setPendingAuthAction(null);
+    }
+  }
+
+  async function handleWebAuthnVerify() {
+    if (webAuthnSubmitting) return;
+    if (!pendingWebAuthn) return;
+    setWebAuthnSubmitting(true);
+    try {
+      const webAuthnToken = await performWebAuthnAssertion(pendingWebAuthn.webAuthnChallenge);
+      const login = await performWebAuthnLogin(pendingWebAuthn, webAuthnToken, rememberDevice);
+      await finalizeLogin(login, pendingWebAuthnMode === 'unlock' ? t('txt_unlocked') : t('txt_login_success'));
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : t('txt_webauthn_assertion_failed'));
+    } finally {
+      setWebAuthnSubmitting(false);
+    }
+  }
+
+  function cancelWebAuthn() {
+    if (webAuthnSubmitting) return;
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+  }
+
+  function switchWebAuthnToTotp() {
+    if (!pendingWebAuthn) return;
+    setPendingTotp({
+      email: pendingWebAuthn.email,
+      passwordHash: pendingWebAuthn.passwordHash,
+      masterKey: pendingWebAuthn.masterKey,
+    });
+    setPendingTotpMode(pendingWebAuthnMode);
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+    setTotpCode('');
+    setRememberDevice(true);
+  }
+
+  async function switchWebAuthnToEmail() {
+    if (!pendingWebAuthn) return;
+    const mode = pendingWebAuthnMode;
+    const snapshot = { ...pendingWebAuthn };
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+    setWebAuthnSubmitting(false);
+    // Trigger send before showing dialog; abort if it fails (user can retry via WebAuthn or recovery)
+    try {
+      await sendEmailLoginCode(snapshot.email, snapshot.passwordHash);
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : t('txt_email_otp_send_failed'));
+      return;
+    }
+    setPendingEmail({
+      email: snapshot.email,
+      passwordHash: snapshot.passwordHash,
+      masterKey: snapshot.masterKey,
+      maskedEmail: snapshot.email,
+    });
+    setPendingEmailMode(mode);
+    setEmailOtpCode('');
+    setEmailOtpRememberDevice(true);
+  }
+
+  async function switchTotpToEmail() {
+    if (!pendingTotp) return;
+    const mode = pendingTotpMode;
+    const snapshot = { ...pendingTotp };
+    setPendingTotp(null);
+    setPendingTotpMode(null);
+    setTotpSubmitting(false);
+    // Trigger send before showing dialog; abort if it fails (user can retry via TOTP or recovery)
+    try {
+      await sendEmailLoginCode(snapshot.email, snapshot.passwordHash);
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : t('txt_email_otp_send_failed'));
+      return;
+    }
+    setPendingEmail({
+      email: snapshot.email,
+      passwordHash: snapshot.passwordHash,
+      masterKey: snapshot.masterKey,
+      maskedEmail: snapshot.email,
+    });
+    setPendingEmailMode(mode);
+    setEmailOtpCode('');
+    setEmailOtpRememberDevice(true);
+  }
+
+  async function handleEmailOtpVerify() {
+    if (emailOtpSubmitting) return;
+    if (!pendingEmail) return;
+    if (!emailOtpCode.trim()) {
+      pushToast('error', t('txt_email_otp_verify_failed'));
+      return;
+    }
+    setEmailOtpSubmitting(true);
+    try {
+      const login = await performEmailLogin(pendingEmail, emailOtpCode, emailOtpRememberDevice);
+      await finalizeLogin(login, pendingEmailMode === 'unlock' ? t('txt_unlocked') : t('txt_login_success'));
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : t('txt_email_otp_verify_failed'));
+    } finally {
+      setEmailOtpSubmitting(false);
+    }
+  }
+
+  async function handleResendEmailOtp() {
+    if (!pendingEmail) return;
+    if (emailOtpResending) return;
+    setEmailOtpResending(true);
+    try {
+      await sendEmailLoginCode(pendingEmail.email, pendingEmail.passwordHash);
+      pushToast('success', t('txt_email_otp_sent_to', { email: pendingEmail.maskedEmail }));
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : t('txt_email_otp_send_failed'));
+    } finally {
+      setEmailOtpResending(false);
     }
   }
 
@@ -707,6 +865,18 @@ export default function App() {
         setRememberDevice(true);
         return;
       }
+      if (result.kind === 'email') {
+        setPendingEmail(result.pendingEmail);
+        setPendingEmailMode('unlock');
+        setEmailOtpCode('');
+        setEmailOtpRememberDevice(true);
+        return;
+      }
+      if (result.kind === 'webauthn') {
+        setPendingWebAuthn(result.pendingWebAuthn);
+        setPendingWebAuthnMode('unlock');
+        return;
+      }
       pushToast('error', result.message || t('txt_unlock_failed_master_password_is_incorrect'));
     } catch {
       pushToast('error', t('txt_unlock_failed_master_password_is_incorrect'));
@@ -729,6 +899,9 @@ export default function App() {
     setUnlockPassword('');
     setPendingTotp(null);
     setPendingTotpMode(null);
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+    setWebAuthnSubmitting(false);
     setTotpCode('');
     setUnlockPreparing(false);
     setPhase('locked');
@@ -750,6 +923,9 @@ export default function App() {
     setUnlockPreparing(false);
     setPendingTotp(null);
     setPendingTotpMode(null);
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+    setWebAuthnSubmitting(false);
     setPhase('login');
     navigate('/login');
   }
@@ -843,6 +1019,24 @@ export default function App() {
         onConfirmDisableTotp={() => {}}
         onCancelDisableTotp={() => {}}
         disableTotpSubmitting={false}
+        pendingWebAuthnOpen={false}
+        webAuthnSubmitting={false}
+        webAuthnHasTotpFallback={false}
+        webAuthnHasEmailFallback={false}
+        onConfirmWebAuthn={() => {}}
+        onCancelWebAuthn={() => {}}
+        onSwitchToTotp={() => {}}
+        pendingEmailOpen={false}
+        emailOtpCode=""
+        emailOtpMaskedAddress=""
+        emailOtpRememberDevice={false}
+        onEmailOtpCodeChange={() => {}}
+        onEmailOtpRememberDeviceChange={() => {}}
+        onConfirmEmailOtp={() => {}}
+        onCancelEmailOtp={() => {}}
+        onResendEmailOtp={() => {}}
+        emailOtpSubmitting={false}
+        emailOtpResending={false}
       />
     );
   }
@@ -968,6 +1162,21 @@ export default function App() {
   const authorizedDevicesQuery = useQuery({
     queryKey: ['authorized-devices', vaultCacheKey || session?.email],
     queryFn: () => getAuthorizedDevices(authedFetch),
+    enabled: !IS_DEMO_MODE && phase === 'app' && !!session?.accessToken && vaultInitialDecryptDone,
+    staleTime: 30_000,
+  });
+  const webAuthnKeysQuery = useQuery({
+    queryKey: ['webauthn-keys', vaultCacheKey || session?.email],
+    queryFn: async () => {
+      const data = await getWebAuthnChallenge(authedFetch);
+      return { keys: data.keys ?? [], enabled: data.enabled ?? (data.keys ?? []).length > 0 };
+    },
+    enabled: !IS_DEMO_MODE && phase === 'app' && !!session?.accessToken && vaultInitialDecryptDone,
+    staleTime: 30_000,
+  });
+  const emailTwoFactorQuery = useQuery({
+    queryKey: ['email-two-factor-status', vaultCacheKey || session?.email],
+    queryFn: () => getEmailTwoFactorStatus(authedFetch),
     enabled: !IS_DEMO_MODE && phase === 'app' && !!session?.accessToken && vaultInitialDecryptDone,
     staleTime: 30_000,
   });
@@ -1362,6 +1571,8 @@ export default function App() {
     onSetConfirm: setConfirm,
     refetchTotpStatus: totpStatusQuery.refetch,
     refetchAuthorizedDevices: authorizedDevicesQuery.refetch,
+    refetchWebAuthnKeys: webAuthnKeysQuery.refetch,
+    refetchEmailTwoFactorStatus: emailTwoFactorQuery.refetch,
   });
   const adminActions = useAdminActions({
     authedFetch,
@@ -1549,6 +1760,61 @@ export default function App() {
     onRemoveDevice: accountSecurityActions.openRemoveDevice,
     onRevokeAllDeviceTrust: accountSecurityActions.openRevokeAllDeviceTrust,
     onRemoveAllDevices: accountSecurityActions.openRemoveAllDevices,
+    // When webAuthn query errored and we have no prior data, don't collapse to empty (would mislead UI).
+    webAuthnKeys: webAuthnKeysQuery.data?.keys ?? [],
+    webAuthnEnabled: webAuthnKeysQuery.isError && webAuthnKeysQuery.data == null ? undefined : webAuthnKeysQuery.data?.enabled,
+    webAuthnKeysLoading: webAuthnKeysQuery.isFetching && !webAuthnKeysQuery.data,
+    webAuthnKeysQueryError: webAuthnKeysQuery.isError && !webAuthnKeysQuery.data,
+    onRegisterWebAuthnKey: accountSecurityActions.registerWebAuthnKey,
+    onDeleteWebAuthnKey: accountSecurityActions.deleteWebAuthnKey,
+    onRenameWebAuthnKey: accountSecurityActions.renameWebAuthnKey,
+    onDisableAllWebAuthn: accountSecurityActions.disableAllWebAuthn,
+    onReEnableWebAuthn: async (masterPassword: string) => {
+      if (!profile) throw new Error('Profile unavailable');
+      const derived = await deriveLoginHash(profile.email, masterPassword, defaultKdfIterations);
+      // #11: prove live possession before re-enabling. Phase 1 returns the assertion
+      // challenge (same shape as performWebAuthnAssertion expects), the browser signs
+      // it via navigator.credentials.get, phase 2 verifies the assertion server-side.
+      const challenge = await getWebAuthnReenableChallenge(authedFetch, derived.hash);
+      const assertionJson = await performWebAuthnAssertion(challenge as Parameters<typeof performWebAuthnAssertion>[0]);
+      await reEnableWebAuthn(authedFetch, derived.hash, assertionJson);
+      await webAuthnKeysQuery.refetch();
+    },
+    // When emailTwoFactor query errored and we have no prior data, don't collapse to false (would mislead as "disabled").
+    emailTwoFactorEnabled: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data ? undefined : emailTwoFactorQuery.data?.enabled,
+    emailTwoFactorConfigured: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data ? undefined : emailTwoFactorQuery.data?.configured,
+    emailTwoFactorAvailable: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data ? undefined : emailTwoFactorQuery.data?.available,
+    emailTwoFactorEnrolledEmail: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data ? undefined : emailTwoFactorQuery.data?.email ?? null,
+    emailTwoFactorQueryError: emailTwoFactorQuery.isError && !emailTwoFactorQuery.data,
+    onDisableEmailTwoFactor: accountSecurityActions.disableEmailTwoFactor,
+    onReEnableEmailTwoFactor: async (masterPassword: string, token?: string) => {
+      if (!profile) throw new Error('Profile unavailable');
+      const derived = await deriveLoginHash(profile.email, masterPassword, defaultKdfIterations);
+      // #11 two-phase: no token -> server emails a code (phase 1); with token -> verify
+      // and re-enable (phase 2). Surface codeSent so the dialog can advance to code entry.
+      const result = await reEnableEmailTwoFactor(authedFetch, derived.hash, token);
+      if (token) await emailTwoFactorQuery.refetch();
+      return result;
+    },
+    onSendEmailSetupCode: async (email: string, masterPassword: string) => {
+      if (!profile) throw new Error('Profile unavailable');
+      const derived = await deriveLoginHash(profile.email, masterPassword, defaultKdfIterations);
+      await sendEmailSetupCode(authedFetch, email, derived.hash);
+    },
+    onEnableEmailTwoFactor: async (email: string, masterPassword: string, token: string) => {
+      if (!profile) throw new Error('Profile unavailable');
+      const derived = await deriveLoginHash(profile.email, masterPassword, defaultKdfIterations);
+      await enableEmailTwoFactor(authedFetch, email, derived.hash, token);
+      await emailTwoFactorQuery.refetch();
+    },
+    totpConfigured: totpStatusQuery.data?.configured,
+    onReEnableTotp: async (masterPassword: string, token: string) => {
+      if (!profile) throw new Error('Profile unavailable');
+      const derived = await deriveLoginHash(profile.email, masterPassword, defaultKdfIterations);
+      // #11: re-enabling TOTP requires a live verifier code proving current device possession.
+      await reEnableTotp(authedFetch, derived.hash, token);
+      await totpStatusQuery.refetch();
+    },
     onRefreshAdmin: adminActions.refreshAdmin,
     onCreateInvite: adminActions.createInvite,
     onDeleteAllInvites: adminActions.deleteAllInvites,
@@ -1695,20 +1961,51 @@ export default function App() {
             setRememberDevice(true);
           }}
           onUseRecoveryCode={() => {
-            if (totpSubmitting) return;
+            if (totpSubmitting || webAuthnSubmitting) return;
             setPendingTotp(null);
             setPendingTotpMode(null);
+            setPendingWebAuthn(null);
+            setPendingWebAuthnMode(null);
+            setWebAuthnSubmitting(false);
             setTotpCode('');
             setRememberDevice(true);
             navigate('/recover-2fa');
           }}
           totpSubmitting={totpSubmitting}
+          totpHasEmailFallback={pendingTotp?.hasEmailFallback ?? false}
+          onSwitchFromTotpToEmail={() => void switchTotpToEmail()}
           disableTotpOpen={false}
           disableTotpPassword=""
           onDisableTotpPasswordChange={() => {}}
           onConfirmDisableTotp={() => {}}
           onCancelDisableTotp={() => {}}
           disableTotpSubmitting={false}
+          pendingWebAuthnOpen={!!pendingWebAuthn}
+          webAuthnSubmitting={webAuthnSubmitting}
+          webAuthnHasTotpFallback={pendingWebAuthn?.hasTotpFallback ?? false}
+          webAuthnHasEmailFallback={pendingWebAuthn?.hasEmailFallback ?? false}
+          onConfirmWebAuthn={() => void handleWebAuthnVerify()}
+          onCancelWebAuthn={cancelWebAuthn}
+          onSwitchToTotp={switchWebAuthnToTotp}
+          onSwitchToEmail={() => void switchWebAuthnToEmail()}
+          pendingEmailOpen={!!pendingEmail}
+          emailOtpCode={emailOtpCode}
+          emailOtpMaskedAddress={pendingEmail?.maskedEmail ?? ''}
+          emailOtpRememberDevice={emailOtpRememberDevice}
+          onEmailOtpCodeChange={setEmailOtpCode}
+          onEmailOtpRememberDeviceChange={setEmailOtpRememberDevice}
+          onConfirmEmailOtp={() => void handleEmailOtpVerify()}
+          onCancelEmailOtp={() => {
+            if (emailOtpSubmitting) return;
+            setPendingEmail(null);
+            setPendingEmailMode(null);
+            setEmailOtpCode('');
+            setEmailOtpRememberDevice(true);
+            setEmailOtpResending(false);
+          }}
+          onResendEmailOtp={() => void handleResendEmailOtp()}
+          emailOtpSubmitting={emailOtpSubmitting}
+          emailOtpResending={emailOtpResending}
         />
       </>
     );
@@ -1769,6 +2066,24 @@ export default function App() {
           setDisableTotpPassword('');
         }}
         disableTotpSubmitting={disableTotpSubmitting}
+        pendingWebAuthnOpen={false}
+        webAuthnSubmitting={false}
+        webAuthnHasTotpFallback={false}
+        webAuthnHasEmailFallback={false}
+        onConfirmWebAuthn={() => {}}
+        onCancelWebAuthn={() => {}}
+        onSwitchToTotp={() => {}}
+        pendingEmailOpen={false}
+        emailOtpCode=""
+        emailOtpMaskedAddress=""
+        emailOtpRememberDevice={false}
+        onEmailOtpCodeChange={() => {}}
+        onEmailOtpRememberDeviceChange={() => {}}
+        onConfirmEmailOtp={() => {}}
+        onCancelEmailOtp={() => {}}
+        onResendEmailOtp={() => {}}
+        emailOtpSubmitting={false}
+        emailOtpResending={false}
       />
     </>
   );

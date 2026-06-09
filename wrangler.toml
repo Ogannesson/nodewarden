@@ -26,6 +26,22 @@ class_name = "NotificationsHub"
 name = "BACKUP_TRANSFER_RUNNER"
 class_name = "BackupTransferRunner"
 
+# Cloudflare Email Sending (Email 2FA default channel).
+# Requires Workers Paid plan + verified sending domain on the account.
+# Set MFA_EMAIL_FROM to the verified sender address in .dev.vars / Worker secrets.
+# remote=true lets wrangler dev use the real Cloudflare Email Sending service.
+[[send_email]]
+name = "EMAIL"
+remote = true
+
+# WebAuthn relying-party config (#7). REQUIRED for passkey 2FA — no Host-header
+# fallback: the server refuses WebAuthn registration/authentication if either is
+# missing. rpId = registrable domain (no scheme/port); origin = full origin the
+# browser sends. Non-secret (public domain), so plaintext [vars] is fine.
+[vars]
+WEBAUTHN_RP_ID = "nodewarden.oganneson.com"
+WEBAUTHN_ORIGIN = "https://nodewarden.oganneson.com"
+
 [[r2_buckets]]
 binding = "ATTACHMENTS"
 bucket_name = "nodewarden-attachments"

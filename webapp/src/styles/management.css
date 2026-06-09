@@ -503,6 +503,23 @@
   grid-template-columns: repeat(2, minmax(0, calc((100% - var(--settings-grid-gap)) / 2)));
 }
 
+/* masonry modifier — SettingsPage 专用；不影响 DomainRulesPage 等使用裸 class 的页面 */
+.settings-modules-grid--masonry {
+  display: block; /* 覆盖 @apply grid 的 display:grid，columns 才能生效 */
+  columns: 2;
+  column-gap: var(--settings-grid-gap);
+}
+
+.settings-modules-grid--masonry > .settings-module,
+.settings-modules-grid--masonry > .card {
+  break-inside: avoid;
+  margin-bottom: var(--settings-grid-gap);
+}
+
+.settings-modules-grid--masonry > :last-child {
+  margin-bottom: 0;
+}
+
 .log-center-page {
   @apply grid h-full min-h-0 gap-3;
   height: 100%;
@@ -1035,13 +1052,6 @@
   width: 100%;
 }
 
-.sensitive-actions-module {
-  @apply min-w-0 p-0;
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-}
-
 .settings-module h3 {
   @apply mb-4 mt-0 text-base font-extrabold;
   color: var(--text);
@@ -1078,24 +1088,6 @@
 
 .session-timeout-fields {
   @apply grid gap-3;
-}
-
-.sensitive-actions-grid {
-  @apply grid gap-[3px];
-}
-
-.sensitive-action {
-  @apply border;
-  border-radius: .5rem;
-  border-width: 1px;
-  padding: 23px .875rem;
-  border-color: var(--line);
-  background: var(--panel);
-}
-
-.sensitive-action h4 {
-  @apply mb-1 mt-0 text-base font-extrabold;
-  color: var(--text);
 }
 
 .recovery-code-card {
@@ -1769,4 +1761,219 @@
   .domain-rule-editing-row .domain-rule-row-actions {
     padding-top: 0;
   }
+}
+
+/* ── WebAuthn key list ── */
+
+.webauthn-keys-list {
+  @apply grid gap-2 mb-3;
+}
+
+.webauthn-key-row {
+  @apply flex items-center justify-between gap-3 rounded-xl px-3 py-2.5;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.webauthn-key-info {
+  @apply flex min-w-0 items-center gap-2;
+}
+
+.webauthn-key-icon {
+  @apply shrink-0;
+  color: var(--primary);
+}
+
+.webauthn-key-name {
+  @apply min-w-0 truncate text-sm font-bold;
+  color: var(--text);
+}
+
+.webauthn-key-date {
+  @apply shrink-0 text-xs;
+  color: var(--muted);
+}
+
+/* ── WebAuthn add-key section ── */
+
+.webauthn-add-section {
+  @apply flex flex-wrap items-end gap-3;
+}
+
+.webauthn-add-section .field {
+  @apply mb-0 min-w-0 flex-1;
+}
+
+@media (max-width: 560px) {
+  .webauthn-key-row {
+    @apply flex-wrap gap-2;
+  }
+
+  .webauthn-key-date {
+    @apply hidden;
+  }
+
+  .webauthn-add-section {
+    @apply flex-col items-stretch;
+  }
+
+  .webauthn-add-section .field {
+    @apply flex-none;
+  }
+}
+
+/* ── MFA toggle switch ── */
+
+.mfa-toggle {
+  @apply relative shrink-0 cursor-pointer rounded-full border-0 p-0;
+  width: 2.25rem;
+  height: 1.25rem;
+  background: var(--line);
+  transition: background 0.18s ease;
+}
+
+.mfa-toggle--on {
+  background: var(--primary);
+}
+
+.mfa-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.mfa-toggle-thumb {
+  @apply absolute left-0.5 top-0.5 rounded-full;
+  width: 1rem;
+  height: 1rem;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.18);
+  transition: transform 0.18s ease;
+}
+
+.mfa-toggle--on .mfa-toggle-thumb {
+  transform: translateX(1rem);
+}
+
+/* ── MFA aggregate status banner ── */
+
+.mfa-status-banner {
+  @apply py-3;
+}
+
+.mfa-status-banner-inner {
+  @apply flex items-center gap-2;
+}
+
+.mfa-status-icon--on {
+  color: var(--success);
+}
+
+.mfa-status-icon--off {
+  color: var(--muted);
+}
+
+.mfa-status-text {
+  @apply text-sm font-bold;
+}
+
+.mfa-status-text--on {
+  color: var(--success);
+}
+
+.mfa-status-text--off {
+  color: var(--muted);
+}
+
+/* ── MFA method enabled note ── */
+
+.mfa-method-enabled-note {
+  @apply mt-1 flex items-center gap-1.5 text-sm;
+  color: var(--success);
+}
+
+/* ── WebAuthn key actions row ── */
+
+.webauthn-key-actions {
+  @apply flex shrink-0 gap-2;
+}
+
+/* ── WebAuthn type badge ── */
+
+.webauthn-key-type-badge {
+  @apply shrink-0 rounded px-1.5 py-0.5 text-xs font-bold;
+  background: color-mix(in srgb, var(--primary) 10%, var(--panel));
+  color: var(--primary-strong);
+  border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--line));
+}
+
+/* ── WebAuthn inline rename input ── */
+
+.webauthn-rename-input {
+  @apply min-w-0 flex-1 text-sm;
+  height: 1.75rem;
+  padding: 0 0.5rem;
+}
+
+@media (max-width: 560px) {
+  .webauthn-key-actions {
+    @apply flex-wrap;
+  }
+}
+
+/* ── MFA method enabled note — disabled modifier ── */
+
+.mfa-method-enabled-note--disabled {
+  opacity: 0.7;
+}
+
+/* ── WebAuthn keys list / add section separator ── */
+
+.webauthn-keys-list + .webauthn-add-section {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 0.75rem;
+  margin-top: 0.25rem;
+}
+
+/* ── Email MFA info block (enrolled address + description) ── */
+
+.email-mfa-info-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.email-mfa-enrolled-addr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.email-mfa-enrolled-addr svg {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.email-mfa-enrolled-label {
+  color: var(--muted);
+  font-weight: 400;
+  flex-shrink: 0;
+}
+
+.email-mfa-enrolled-value {
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.email-mfa-info-desc {
+  font-size: 13px;
+  color: var(--muted);
 }

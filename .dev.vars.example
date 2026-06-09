@@ -3,3 +3,61 @@
 # Generate one with: openssl rand -hex 32
 # (Example only, 64 hex chars = 32 bytes)
 JWT_SECRET=Enter-your-JWT-key-here-at-least-32-characters
+
+# Email 2FA (optional — leave both backends blank to disable Email 2FA entirely)
+#
+# Required for any backend:
+# MFA_EMAIL_FROM=noreply@your-domain.com
+#
+# Optional: override backend selection ('cloudflare' | 'http' | 'auto').
+# Default 'auto' tries Cloudflare Email first, falls back to HTTP if configured.
+# MFA_EMAIL_PROVIDER=auto
+
+# ---------------------------------------------------------------------------
+# Option A — Cloudflare Email Sending (recommended default)
+# ---------------------------------------------------------------------------
+# Declare a [[send_email]] binding in wrangler.toml (already present).
+# The EMAIL binding is injected at runtime; no env var needed.
+# Requires Workers Paid plan + verified sending domain in your Cloudflare account.
+# Use 'wrangler dev' with remote=true to test against the real service.
+
+# ---------------------------------------------------------------------------
+# Option B — Generic HTTP endpoint (any flat-JSON email API)
+# ---------------------------------------------------------------------------
+# Point at any HTTP endpoint that accepts a flat JSON body and returns 2xx on success.
+# Example (replace with your own endpoint):
+# MFA_EMAIL_HTTP_ENDPOINT=https://your-email-api.example/send
+# MFA_EMAIL_HTTP_AUTH=Bearer your-api-token-here
+#
+# Optional: extra headers as a JSON object (merged with Authorization).
+# MFA_EMAIL_HTTP_HEADERS={"X-Custom-Header":"value"}
+#
+# Optional: extra body fields as a JSON object added to every request.
+# MFA_EMAIL_HTTP_BODY={"source":"nodewarden"}
+#
+# Optional: set to "1" if the endpoint requires 'to' as an array instead of a string.
+# MFA_EMAIL_HTTP_TO_ARRAY=0
+#
+# Optional: JSON body template for APIs that require nested request structures.
+# When set, the flat-mode fields above (MFA_EMAIL_HTTP_BODY / MFA_EMAIL_HTTP_TO_ARRAY
+# and the default field names) are ignored; the template drives the entire body.
+# Supported placeholders (whole-value only — "Hi {{to}}" is not interpolated):
+#   "{{from}}"    → sender address   "{{to}}"   → recipient address
+#   "{{subject}}" → email subject    "{{text}}"  → plain-text body
+#   "{{html}}"    → HTML body (key is omitted entirely when no HTML is supplied)
+#
+# Nested structure API example:
+# MFA_EMAIL_HTTP_BODY_TEMPLATE={"from":{"email":"{{from}}"},"recipients":[{"email":"{{to}}"}],"text_content":"{{text}}","html_content":"{{html}}"}
+#
+# Local testing mock (returns 2xx, no real email sent):
+# MFA_EMAIL_HTTP_ENDPOINT=http://localhost:9876/send
+
+# ---------------------------------------------------------------------------
+# WebAuthn / Passkey (REQUIRED for passkey 2FA — no Host-header fallback)
+# ---------------------------------------------------------------------------
+# Both must be set or the server refuses WebAuthn registration/authentication.
+#   WEBAUTHN_RP_ID:  registrable domain, no scheme/port, e.g. vault.example.com
+#   WEBAUTHN_ORIGIN: full origin browsers send, e.g. https://vault.example.com
+# For local dev these typically point at localhost:
+# WEBAUTHN_RP_ID=localhost
+# WEBAUTHN_ORIGIN=http://localhost:8787

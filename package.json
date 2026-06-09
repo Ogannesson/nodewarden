@@ -7,6 +7,8 @@
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
     "dev": "npm run build && wrangler dev -c wrangler.toml",
     "dev:kv": "npm run build && wrangler dev -c wrangler.kv.toml",
     "dev:demo": "vite --config webapp/vite.config.ts --mode demo --host 127.0.0.1 --port 5174",
@@ -53,6 +55,7 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.1",
+    "vitest": "^4.1.8",
     "wrangler": "^4.71.0"
   },
   "dependencies": {

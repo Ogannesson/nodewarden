@@ -5,6 +5,8 @@ import {
   loadProfileSnapshot,
   loadSession,
   loginWithPassword,
+  loginWithEmailCode,
+  sendEmailLoginCode,
   refreshAccessToken,
   recoverTwoFactor,
   registerAccount,
@@ -14,10 +16,45 @@ import { readInviteCodeFromUrl } from '@/lib/app-support';
 import { t, translateServerError } from '@/lib/i18n';
 import type { AppPhase, Profile, SessionState, TokenSuccess, WebBootstrapResponse } from '@/lib/types';
 
+/** Two-factor provider key constants (Bitwarden-compatible string representation). */
+export const PROVIDER_TOTP = '0';
+export const PROVIDER_EMAIL = '1';
+export const PROVIDER_WEBAUTHN = '7';
+
 export interface PendingTotp {
   email: string;
   passwordHash: string;
   masterKey: Uint8Array;
+  /** Whether Email (provider 1) is also available as a fallback from the TOTP dialog. */
+  hasEmailFallback?: boolean;
+}
+
+export interface WebAuthnChallenge {
+  challenge: string;
+  allowCredentials?: Array<{ type: string; id: string }>;
+  rpId?: string;
+  userVerification?: string;
+  timeout?: number;
+}
+
+export interface PendingWebAuthn {
+  email: string;
+  passwordHash: string;
+  masterKey: Uint8Array;
+  /** Whether TOTP is also available as fallback. */
+  hasTotpFallback: boolean;
+  /** Whether Email (provider 1) is also available as fallback. */
+  hasEmailFallback: boolean;
+  webAuthnChallenge: WebAuthnChallenge;
+}
+
+/** Pending Email 2FA challenge (provider 1). */
+export interface PendingEmail {
+  email: string;
+  passwordHash: string;
+  masterKey: Uint8Array;
+  /** Masked destination address returned by the server (e.g. "u***@example.com"). */
+  maskedEmail: string;
 }
 
 export type JwtUnsafeReason = 'missing' | 'default' | 'too_short';
@@ -49,6 +86,8 @@ export interface CompletedLogin {
 export type PasswordLoginResult =
   | { kind: 'success'; login: CompletedLogin }
   | { kind: 'totp'; pendingTotp: PendingTotp }
+  | { kind: 'email'; pendingEmail: PendingEmail }
+  | { kind: 'webauthn'; pendingWebAuthn: PendingWebAuthn }
   | { kind: 'error'; message: string };
 
 export interface RecoverTwoFactorResult {
@@ -314,14 +353,75 @@ export async function performPasswordLogin(
     };
   }
 
-  const tokenError = token as { TwoFactorProviders?: unknown; error_description?: string; error?: string };
+  const tokenError = token as {
+    TwoFactorProviders?: unknown;
+    TwoFactorProviders2?: Record<string, unknown>;
+    error_description?: string;
+    error?: string;
+  };
   if (tokenError.TwoFactorProviders) {
+    const providers = tokenError.TwoFactorProviders as unknown[];
+    const providers2 = tokenError.TwoFactorProviders2 ?? {};
+
+    // Normalise to string keys so we handle both server shapes:
+    // legacy numeric array [0, 7] and current string array ["0", "7"].
+    const providerKeys = (Array.isArray(providers) ? providers : []).map((x) => String(x));
+
+    // Prefer WebAuthn (provider 7) when the server advertises it.
+    if (providerKeys.includes(PROVIDER_WEBAUTHN) && providers2[PROVIDER_WEBAUTHN]) {
+      const p7 = providers2[PROVIDER_WEBAUTHN] as Record<string, unknown>;
+      const webAuthnChallenge: WebAuthnChallenge = {
+        challenge: String(p7['challenge'] ?? ''),
+        rpId: typeof p7['rpId'] === 'string' ? p7['rpId'] : undefined,
+        userVerification: typeof p7['userVerification'] === 'string' ? p7['userVerification'] : undefined,
+        timeout: typeof p7['timeout'] === 'number' ? p7['timeout'] : undefined,
+        allowCredentials: Array.isArray(p7['allowCredentials'])
+          ? (p7['allowCredentials'] as Array<{ type: string; id: string }>)
+          : [],
+      };
+      return {
+        kind: 'webauthn',
+        pendingWebAuthn: {
+          email: normalizedEmail,
+          passwordHash: derived.hash,
+          masterKey: derived.masterKey,
+          hasTotpFallback: providerKeys.includes(PROVIDER_TOTP),
+          hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
+          webAuthnChallenge,
+        },
+      };
+    }
+
+    // Email 2FA (provider 1) — only triggered when no WebAuthn or TOTP is available.
+    // If the user has BOTH TOTP and Email enabled, they land in the TOTP branch below
+    // and can switch to email from the TOTP dialog (via hasEmailFallback).
+    if (providerKeys.includes(PROVIDER_EMAIL) && !providerKeys.includes(PROVIDER_TOTP)) {
+      const p1 = providers2[PROVIDER_EMAIL] as Record<string, unknown> | null | undefined;
+      // Server returns TwoFactorProviders2["1"] = { Email: "u***@e***.com" } (capital E,
+      // Bitwarden-compatible). Accept both casings defensively so the masked address shows.
+      const maskedEmail = (typeof p1?.['Email'] === 'string' ? p1['Email']
+        : typeof p1?.['email'] === 'string' ? p1['email'] : null) ?? normalizedEmail;
+      // Trigger the server to send the email OTP immediately.
+      await sendEmailLoginCode(normalizedEmail, derived.hash);
+      return {
+        kind: 'email',
+        pendingEmail: {
+          email: normalizedEmail,
+          passwordHash: derived.hash,
+          masterKey: derived.masterKey,
+          maskedEmail,
+        },
+      };
+    }
+
     return {
       kind: 'totp',
       pendingTotp: {
         email: normalizedEmail,
         passwordHash: derived.hash,
         masterKey: derived.masterKey,
+        // When the user has email 2FA as well, surface a "switch to email" button in the UI.
+        hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
       },
     };
   }
@@ -330,6 +430,35 @@ export async function performPasswordLogin(
     kind: 'error',
     message: translateServerError(tokenError.error_description || tokenError.error, t('txt_login_failed')),
   };
+}
+
+export async function performWebAuthnLogin(
+  pendingWebAuthn: PendingWebAuthn,
+  webAuthnToken: string,
+  rememberDevice: boolean
+): Promise<CompletedLogin> {
+  const token = await loginWithPassword(pendingWebAuthn.email, pendingWebAuthn.passwordHash, {
+    webAuthnToken,
+    rememberDevice,
+  });
+  if ('access_token' in token && token.access_token) {
+    return completeLogin(token, pendingWebAuthn.email, pendingWebAuthn.masterKey);
+  }
+  const tokenError = token as { error_description?: string; error?: string };
+  throw new Error(translateServerError(tokenError.error_description || tokenError.error, t('txt_webauthn_assertion_failed')));
+}
+
+export async function performEmailLogin(
+  pendingEmail: PendingEmail,
+  emailCode: string,
+  rememberDevice: boolean
+): Promise<CompletedLogin> {
+  const token = await loginWithEmailCode(pendingEmail.email, pendingEmail.passwordHash, emailCode, rememberDevice);
+  if ('access_token' in token && token.access_token) {
+    return completeLogin(token, pendingEmail.email, pendingEmail.masterKey);
+  }
+  const tokenError = token as { error_description?: string; error?: string };
+  throw new Error(translateServerError(tokenError.error_description || tokenError.error, t('txt_email_otp_verify_failed')));
 }
 
 export async function performTotpLogin(
@@ -407,14 +536,73 @@ export async function performUnlock(
     };
   }
 
-  const tokenError = token as { TwoFactorProviders?: unknown; error_description?: string; error?: string };
+  const tokenError = token as {
+    TwoFactorProviders?: unknown;
+    TwoFactorProviders2?: Record<string, unknown>;
+    error_description?: string;
+    error?: string;
+  };
   if (tokenError.TwoFactorProviders) {
+    const providers = tokenError.TwoFactorProviders as unknown[];
+    const providers2 = tokenError.TwoFactorProviders2 ?? {};
+
+    // Normalise to string keys so we handle both server shapes:
+    // legacy numeric array [0, 7] and current string array ["0", "7"].
+    const providerKeys = (Array.isArray(providers) ? providers : []).map((x) => String(x));
+
+    if (providerKeys.includes(PROVIDER_WEBAUTHN) && providers2[PROVIDER_WEBAUTHN]) {
+      const p7 = providers2[PROVIDER_WEBAUTHN] as Record<string, unknown>;
+      const webAuthnChallenge: WebAuthnChallenge = {
+        challenge: String(p7['challenge'] ?? ''),
+        rpId: typeof p7['rpId'] === 'string' ? p7['rpId'] : undefined,
+        userVerification: typeof p7['userVerification'] === 'string' ? p7['userVerification'] : undefined,
+        timeout: typeof p7['timeout'] === 'number' ? p7['timeout'] : undefined,
+        allowCredentials: Array.isArray(p7['allowCredentials'])
+          ? (p7['allowCredentials'] as Array<{ type: string; id: string }>)
+          : [],
+      };
+      return {
+        kind: 'webauthn',
+        pendingWebAuthn: {
+          email: normalizedEmail,
+          passwordHash: derived.hash,
+          masterKey: derived.masterKey,
+          hasTotpFallback: providerKeys.includes(PROVIDER_TOTP),
+          hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
+          webAuthnChallenge,
+        },
+      };
+    }
+
+    // Email 2FA (provider 1) — only triggered when no WebAuthn or TOTP is available.
+    // If the user has BOTH TOTP and Email enabled, they land in the TOTP branch below
+    // and can switch to email from the TOTP dialog (via hasEmailFallback).
+    if (providerKeys.includes(PROVIDER_EMAIL) && !providerKeys.includes(PROVIDER_TOTP)) {
+      const p1 = providers2[PROVIDER_EMAIL] as Record<string, unknown> | null | undefined;
+      // Server returns TwoFactorProviders2["1"] = { Email: "u***@e***.com" } (capital E,
+      // Bitwarden-compatible). Accept both casings defensively so the masked address shows.
+      const maskedEmail = (typeof p1?.['Email'] === 'string' ? p1['Email']
+        : typeof p1?.['email'] === 'string' ? p1['email'] : null) ?? normalizedEmail;
+      await sendEmailLoginCode(normalizedEmail, derived.hash);
+      return {
+        kind: 'email',
+        pendingEmail: {
+          email: normalizedEmail,
+          passwordHash: derived.hash,
+          masterKey: derived.masterKey,
+          maskedEmail,
+        },
+      };
+    }
+
     return {
       kind: 'totp',
       pendingTotp: {
         email: normalizedEmail,
         passwordHash: derived.hash,
         masterKey: derived.masterKey,
+        // When the user has email 2FA as well, surface a "switch to email" button in the UI.
+        hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
       },
     };
   }

@@ -16,6 +16,9 @@ import {
   getUserById as findStoredUserById,
   getUserCount as countStoredUsers,
   saveUser as saveStoredUser,
+  updateTotpLastCounter as updateStoredTotpLastCounter,
+  atomicConsumeRecoveryCode as atomicConsumeStoredRecoveryCode,
+  atomicRotateRecoveryCode as atomicRotateStoredRecoveryCode,
 } from './storage-user-repo';
 import {
   type AuditLogListOptions,
@@ -112,6 +115,17 @@ import {
   updateRevisionDate as updateStoredRevisionDate,
 } from './storage-revision-repo';
 import {
+  type TwoFactorRow,
+  deleteAllTwoFactorsByUserId as deleteStoredAllTwoFactors,
+  deleteTransientTwoFactorsByUserId as deleteStoredTransientTwoFactors,
+  deleteTwoFactor as deleteStoredTwoFactor,
+  getEnabledTwoFactorUserIds as findStoredEnabledTwoFactorUserIds,
+  getTwoFactor as findStoredTwoFactor,
+  getTwoFactorsByUserId as listStoredTwoFactors,
+  touchTwoFactorLastUsed as touchStoredTwoFactorLastUsed,
+  upsertTwoFactor as upsertStoredTwoFactor,
+} from './storage-two-factor-repo';
+import {
   getUserDomainSettings as getStoredUserDomainSettings,
   saveUserDomainSettings as saveStoredUserDomainSettings,
 } from './storage-domain-rules-repo';
@@ -122,7 +136,7 @@ const STORAGE_SCHEMA_VERSION_KEY = 'schema.version';
 // Bump this whenever src/services/storage-schema.ts or migrations/0001_init.sql
 // changes. Existing D1 installs only rerun ensureStorageSchema() when this value
 // differs from config.schema.version.
-const STORAGE_SCHEMA_VERSION = '2026-05-14-lightweight-audit-logs';
+const STORAGE_SCHEMA_VERSION = '2026-06-04-totp-replay-counter';
 
 // D1-backed storage.
 // Contract:
@@ -254,6 +268,34 @@ export class StorageService {
 
   async deleteUserById(id: string): Promise<boolean> {
     return deleteStoredUserById(this.db, id);
+  }
+
+  /** H3: Atomically claim a TOTP counter for replay protection.
+   *  Returns true when the counter was written; false means a concurrent
+   *  request already claimed it (replay) and the caller must reject.
+   */
+  async updateTotpLastCounter(userId: string, counter: number): Promise<boolean> {
+    return updateStoredTotpLastCounter(this.db, userId, counter);
+  }
+
+  /** H3: Atomically consume a recovery code for TOTP disable (fail-closed).
+   *  Returns false when another concurrent request already consumed it.
+   */
+  async atomicConsumeRecoveryCode(userId: string, storedCode: string): Promise<boolean> {
+    return atomicConsumeStoredRecoveryCode(this.db, userId, storedCode);
+  }
+
+  /** H3: Atomically rotate a recovery code (account recovery flow, fail-closed).
+   *  Returns false when another concurrent request already rotated the code.
+   */
+  async atomicRotateRecoveryCode(
+    userId: string,
+    oldStoredCode: string,
+    newHashedCode: string,
+    newSecurityStamp: string,
+    updatedAt: string,
+  ): Promise<boolean> {
+    return atomicRotateStoredRecoveryCode(this.db, userId, oldStoredCode, newHashedCode, newSecurityStamp, updatedAt);
   }
 
   async createInvite(invite: Invite): Promise<void> {
@@ -690,5 +732,42 @@ export class StorageService {
       StorageService.lastAttachmentTokenCleanupAt = result.cleanedUpAt;
     }
     return result.consumed;
+  }
+
+  // --- Two-factor providers (non-TOTP: WebAuthn, Email, YubiKey…) ---
+  // TOTP continues to use users.totp_secret (conservative dual-track).
+
+  async getTwoFactorsByUserId(userId: string): Promise<TwoFactorRow[]> {
+    return listStoredTwoFactors(this.db, userId);
+  }
+
+  async getTwoFactor(userId: string, atype: number): Promise<TwoFactorRow | null> {
+    return findStoredTwoFactor(this.db, userId, atype);
+  }
+
+  async upsertTwoFactor(row: TwoFactorRow): Promise<void> {
+    await upsertStoredTwoFactor(this.db, row);
+  }
+
+  async deleteTwoFactor(userId: string, atype: number): Promise<boolean> {
+    return deleteStoredTwoFactor(this.db, userId, atype);
+  }
+
+  async deleteAllTwoFactorsByUserId(userId: string): Promise<number> {
+    return deleteStoredAllTwoFactors(this.db, userId);
+  }
+
+  /** C4: Remove all transient login-challenge rows (atype >= 1000) for a user. */
+  async deleteTransientTwoFactorsByUserId(userId: string): Promise<number> {
+    return deleteStoredTransientTwoFactors(this.db, userId);
+  }
+
+  async touchTwoFactorLastUsed(userId: string, atype: number, nowMs: number = Date.now()): Promise<void> {
+    await touchStoredTwoFactorLastUsed(this.db, userId, atype, nowMs);
+  }
+
+  /** C3: Return the set of user IDs with at least one active persistent two_factor provider. */
+  async getEnabledTwoFactorUserIds(): Promise<Set<string>> {
+    return findStoredEnabledTwoFactorUserIds(this.db);
   }
 }

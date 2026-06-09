@@ -231,6 +231,8 @@ export async function loginWithPassword(
   passwordHash: string,
   options?: {
     totpCode?: string;
+    /** Pre-serialised WebAuthn assertion JSON string (twoFactorProvider=7). */
+    webAuthnToken?: string;
     rememberDevice?: boolean;
     useRememberToken?: boolean;
   }
@@ -248,6 +250,12 @@ export async function loginWithPassword(
   if (rememberedToken) {
     body.set('twoFactorProvider', '5');
     body.set('twoFactorToken', rememberedToken);
+  } else if (options?.webAuthnToken) {
+    body.set('twoFactorProvider', '7');
+    body.set('twoFactorToken', options.webAuthnToken);
+    if (options.rememberDevice) {
+      body.set('twoFactorRemember', '1');
+    }
   } else if (options?.totpCode) {
     body.set('twoFactorProvider', '0');
     body.set('twoFactorToken', options.totpCode);
@@ -610,11 +618,106 @@ export async function getVaultRevisionDate(authedFetch: AuthedFetch): Promise<nu
   return stamp;
 }
 
-export async function getTotpStatus(authedFetch: AuthedFetch): Promise<{ enabled: boolean }> {
+export async function getTotpStatus(authedFetch: AuthedFetch): Promise<{ enabled: boolean; configured: boolean }> {
   const resp = await authedFetch('/api/accounts/totp');
   if (!resp.ok) throw new Error('Failed to load TOTP status');
-  const body = (await parseJson<{ enabled?: boolean }>(resp)) || {};
-  return { enabled: !!body.enabled };
+  const body = (await parseJson<{ enabled?: boolean; configured?: boolean }>(resp)) || {};
+  return { enabled: !!body.enabled, configured: !!body.configured };
+}
+
+/**
+ * Re-enable TOTP (reversible disable recovery).
+ * Requires masterPasswordHash. Secret is retained from the previous disable.
+ * Use only when configured=true && enabled=false.
+ */
+export async function reEnableTotp(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string,
+  token?: string
+): Promise<void> {
+  // #11: re-enabling TOTP now requires a live code (proof of current device possession).
+  // token is optional at the API layer until the SettingsPage UI collects it; the
+  // server rejects the request when token is missing.
+  const resp = await authedFetch('/api/accounts/totp', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: true, masterPasswordHash, token }),
+  });
+  if (!resp.ok) {
+    const body = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(body?.error_description || body?.error, t('txt_totp_update_failed')));
+  }
+}
+
+/**
+ * #11 phase 1: request a WebAuthn assertion challenge to re-enable previously
+ * disabled credentials. POSTs only the masterPasswordHash (no assertion); the
+ * server replies with the challenge options the browser needs for
+ * navigator.credentials.get(). The returned shape matches performWebAuthnAssertion's
+ * input (challenge / allowCredentials / rpId / userVerification / timeout), so it
+ * can be passed through directly.
+ */
+export async function getWebAuthnReenableChallenge(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string
+): Promise<Record<string, unknown>> {
+  const resp = await authedFetch('/api/two-factor/webauthn/reenable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_disable_all_failed')));
+  }
+  return (await parseJson<Record<string, unknown>>(resp)) || {};
+}
+
+/**
+ * #11 phase 2: re-enable all WebAuthn credentials after proving live possession.
+ * Requires masterPasswordHash plus a serialized assertion (from performWebAuthnAssertion).
+ * Credentials are preserved from the previous disable; the server verifies the
+ * assertion against them before flipping enabled back on.
+ */
+export async function reEnableWebAuthn(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string,
+  assertionJson: string
+): Promise<void> {
+  const resp = await authedFetch('/api/two-factor/webauthn/reenable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ masterPasswordHash, token: assertionJson }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_disable_all_failed')));
+  }
+}
+
+/**
+ * Re-enable Email 2FA after a reversible soft-disable.
+ * Requires masterPasswordHash. Enrolled email is retained.
+ */
+export async function reEnableEmailTwoFactor(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string,
+  token?: string
+): Promise<{ codeSent: boolean; email?: string | null }> {
+  // #11: two-phase — without a token the server sends a code to the enrolled address
+  // (phase 1); with the token it verifies and re-enables (phase 2). Phase 1 echoes the
+  // masked enrolled email so the UI can show where the code went.
+  const resp = await authedFetch('/api/two-factor/email/reenable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(token ? { masterPasswordHash, token } : { masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_reenable_email_mfa_failed')));
+  }
+  const body = (await parseJson<{ codeSent?: boolean; email?: string | null }>(resp)) || {};
+  return { codeSent: !!body.codeSent, email: body.email ?? null };
 }
 
 export async function getTotpRecoveryCode(
@@ -632,6 +735,17 @@ export async function getTotpRecoveryCode(
   }
   const body = (await parseJson<{ code?: string }>(resp)) || {};
   return String(body.code || '');
+}
+
+/**
+ * #10: one-time retrieval of the freshly-rotated recovery code after a recovery-code
+ * login. Returns the plaintext once (server deletes it on read), or null if none.
+ */
+export async function getRotatedRecoveryCode(authedFetch: AuthedFetch): Promise<string | null> {
+  const resp = await authedFetch('/api/two-factor/recover', { method: 'GET' });
+  if (!resp.ok) return null;
+  const body = (await parseJson<{ code?: string | null }>(resp)) || {};
+  return body.code ? String(body.code) : null;
 }
 
 export async function recoverTwoFactor(
@@ -737,4 +851,414 @@ export async function rotateApiKey(authedFetch: AuthedFetch, masterPasswordHash:
   }
   const body = (await parseJson<{ apiKey?: string }>(resp)) || {};
   return String(body.apiKey || '');
+}
+
+// ---------------------------------------------------------------------------
+// WebAuthn (FIDO2) security key APIs
+// ---------------------------------------------------------------------------
+
+export interface WebAuthnKeyInfo {
+  id: string;
+  name: string;
+  createdAt: string;
+  /** Authenticator transport hints — absent on legacy credentials. */
+  transports?: string[];
+  /** Authenticator attachment ('platform' | 'cross-platform') — absent on legacy credentials. */
+  attachment?: string;
+}
+
+interface WebAuthnChallengeResponse {
+  challenge: string;
+  rp?: { id?: string; name?: string };
+  user?: { id?: string; name?: string; displayName?: string };
+  pubKeyCredParams?: Array<{ type: string; alg: number }>;
+  timeout?: number;
+  excludeCredentials?: Array<{ type: string; id: string }>;
+  authenticatorSelection?: Record<string, unknown>;
+  attestation?: string;
+  /** Whether WebAuthn is actively enabled (false = soft-disabled, credentials retained). */
+  enabled?: boolean;
+  keys?: WebAuthnKeyInfo[];
+  status?: string;
+  errorMessage?: string;
+}
+
+/** base64url encode without padding. */
+function toBase64Url(buf: ArrayBuffer | Uint8Array): string {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+/** base64url decode (with or without padding). */
+function fromBase64Url(b64: string): ArrayBuffer {
+  const normalized = b64.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4 || 4)) % 4);
+  const binary = atob(padded);
+  const buf = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
+  return buf.buffer;
+}
+
+/**
+ * Get WebAuthn registration challenge + list of existing keys.
+ */
+export async function getWebAuthnChallenge(
+  authedFetch: AuthedFetch
+): Promise<WebAuthnChallengeResponse> {
+  const resp = await authedFetch('/api/two-factor/webauthn');
+  if (!resp.ok) {
+    const body = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(body?.error_description || body?.error, t('txt_webauthn_load_failed')));
+  }
+  return (await parseJson<WebAuthnChallengeResponse>(resp)) || { challenge: '', keys: [] };
+}
+
+/**
+ * Register a new WebAuthn security key.
+ * Calls navigator.credentials.create() then submits the attestation to the server.
+ * Returns the updated list of registered keys.
+ */
+export async function registerWebAuthnKey(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string,
+  keyName: string
+): Promise<WebAuthnKeyInfo[]> {
+  // 1. Get challenge from server
+  const challenge = await getWebAuthnChallenge(authedFetch);
+  if (!challenge.challenge) throw new Error(t('txt_webauthn_challenge_failed'));
+
+  // 2. Call WebAuthn API
+  const creationOptions: PublicKeyCredentialCreationOptions = {
+    challenge: fromBase64Url(challenge.challenge),
+    rp: {
+      id: challenge.rp?.id,
+      name: challenge.rp?.name ?? 'NodeWarden',
+    },
+    user: {
+      id: fromBase64Url(challenge.user?.id ?? toBase64Url(crypto.getRandomValues(new Uint8Array(16)))),
+      name: challenge.user?.name ?? '',
+      displayName: challenge.user?.displayName ?? '',
+    },
+    pubKeyCredParams: (challenge.pubKeyCredParams ?? [
+      { type: 'public-key', alg: -7 },
+      { type: 'public-key', alg: -257 },
+    ]) as PublicKeyCredentialParameters[],
+    timeout: challenge.timeout ?? 60000,
+    excludeCredentials: (challenge.excludeCredentials ?? []).map(c => ({
+      type: 'public-key' as const,
+      id: fromBase64Url(c.id),
+    })),
+    authenticatorSelection: {
+      userVerification: 'discouraged',
+      ...(challenge.authenticatorSelection ?? {}),
+    },
+    attestation: 'none',
+  };
+
+  let credential: PublicKeyCredential;
+  try {
+    const cred = await navigator.credentials.create({ publicKey: creationOptions });
+    if (!cred || cred.type !== 'public-key') throw new Error(t('txt_webauthn_create_cancelled'));
+    credential = cred as PublicKeyCredential;
+  } catch (err) {
+    if (err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'AbortError')) {
+      throw new Error(t('txt_webauthn_create_cancelled'));
+    }
+    throw new Error(err instanceof Error ? err.message : t('txt_webauthn_create_failed'));
+  }
+
+  const attestation = credential.response as AuthenticatorAttestationResponse;
+  // Capture transports and attachment for type-badge display server-side
+  const transports: string[] = typeof (attestation as { getTransports?: () => string[] }).getTransports === 'function'
+    ? (attestation as { getTransports: () => string[] }).getTransports()
+    : [];
+  const attachment: string | undefined = (credential as { authenticatorAttachment?: string | null }).authenticatorAttachment ?? undefined;
+
+  const body = {
+    id: credential.id,
+    rawId: toBase64Url(credential.rawId),
+    type: credential.type,
+    response: {
+      attestationObject: toBase64Url(attestation.attestationObject),
+      clientDataJSON: toBase64Url(attestation.clientDataJSON),
+    },
+    name: keyName.trim() || t('txt_webauthn_default_key_name'),
+    masterPasswordHash,
+    transports,
+    attachment,
+  };
+
+  // 3. Submit attestation to server
+  const resp = await authedFetch('/api/two-factor/webauthn', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_register_failed')));
+  }
+  const result = (await parseJson<{ keys?: WebAuthnKeyInfo[] }>(resp)) || {};
+  return result.keys ?? [];
+}
+
+/**
+ * Delete a registered WebAuthn security key.
+ * Returns the updated list of registered keys.
+ */
+export async function deleteWebAuthnKey(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string,
+  keyId: string
+): Promise<WebAuthnKeyInfo[]> {
+  const resp = await authedFetch('/api/two-factor/webauthn', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ masterPasswordHash, id: keyId }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_delete_failed')));
+  }
+  const result = (await parseJson<{ keys?: WebAuthnKeyInfo[] }>(resp)) || {};
+  return result.keys ?? [];
+}
+
+/**
+ * Rename a registered WebAuthn security key.
+ * Does not require masterPasswordHash — renaming is cosmetic.
+ * Returns the updated list of keys.
+ */
+export async function renameWebAuthnKey(
+  authedFetch: AuthedFetch,
+  credentialId: string,
+  name: string
+): Promise<WebAuthnKeyInfo[]> {
+  const resp = await authedFetch('/api/two-factor/webauthn', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ credentialId, name }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_rename_failed')));
+  }
+  const result = (await parseJson<{ keys?: WebAuthnKeyInfo[] }>(resp)) || {};
+  return result.keys ?? [];
+}
+
+/**
+ * Disable all WebAuthn credentials for the current user.
+ * Requires masterPasswordHash for verification.
+ * Returns the updated (empty) list of keys.
+ */
+export async function disableAllWebAuthn(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string
+): Promise<WebAuthnKeyInfo[]> {
+  const resp = await authedFetch('/api/two-factor/webauthn', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_webauthn_disable_all_failed')));
+  }
+  const result = (await parseJson<{ keys?: WebAuthnKeyInfo[] }>(resp)) || {};
+  return result.keys ?? [];
+}
+
+/**
+ * Perform WebAuthn assertion during login (provider 7).
+ * Calls navigator.credentials.get() and returns the JSON token to submit.
+ * The caller should POST this to /identity/connect/token as twoFactorToken.
+ */
+export async function performWebAuthnAssertion(
+  challengePayload: {
+    challenge: string;
+    allowCredentials?: Array<{ type: string; id: string }>;
+    rpId?: string;
+    userVerification?: string;
+    timeout?: number;
+  }
+): Promise<string> {
+  const options: PublicKeyCredentialRequestOptions = {
+    challenge: fromBase64Url(challengePayload.challenge),
+    allowCredentials: (challengePayload.allowCredentials ?? []).map(c => ({
+      type: 'public-key' as const,
+      id: fromBase64Url(c.id),
+    })),
+    rpId: challengePayload.rpId,
+    userVerification: (challengePayload.userVerification ?? 'discouraged') as UserVerificationRequirement,
+    timeout: challengePayload.timeout ?? 60000,
+  };
+
+  let credential: PublicKeyCredential;
+  try {
+    const cred = await navigator.credentials.get({ publicKey: options });
+    if (!cred || cred.type !== 'public-key') throw new Error(t('txt_webauthn_get_cancelled'));
+    credential = cred as PublicKeyCredential;
+  } catch (err) {
+    if (err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'AbortError')) {
+      throw new Error(t('txt_webauthn_get_cancelled'));
+    }
+    throw new Error(err instanceof Error ? err.message : t('txt_webauthn_assertion_failed'));
+  }
+
+  const assertion = credential.response as AuthenticatorAssertionResponse;
+  return JSON.stringify({
+    id: credential.id,
+    rawId: toBase64Url(credential.rawId),
+    type: credential.type,
+    response: {
+      authenticatorData: toBase64Url(assertion.authenticatorData),
+      clientDataJSON: toBase64Url(assertion.clientDataJSON),
+      signature: toBase64Url(assertion.signature),
+      userHandle: assertion.userHandle ? toBase64Url(assertion.userHandle) : null,
+    },
+    extensions: {},
+  });
+}
+
+/**
+ * GET /api/two-factor/email
+ * Returns whether email 2FA is enabled for the current user.
+ * Throws on non-2xx (caller must handle errors explicitly).
+ */
+export async function getEmailTwoFactorStatus(authedFetch: AuthedFetch): Promise<{ enabled: boolean; available: boolean; configured: boolean; email?: string | null }> {
+  const resp = await authedFetch('/api/two-factor/email', { method: 'GET' });
+  if (!resp.ok) {
+    const body = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(body?.error_description || body?.error, t('txt_email_mfa_load_failed')));
+  }
+  const result = (await parseJson<{ enabled?: boolean; available?: boolean; configured?: boolean; email?: string | null }>(resp)) || {};
+  // available is explicitly returned by the server (true only when an email channel — Cloudflare binding or custom HTTP — is configured)
+  return { enabled: !!result.enabled, available: !!result.available, configured: !!result.configured, email: result.email ?? null };
+}
+
+/**
+ * POST /api/two-factor/send-email-login
+ * Triggers the server to send a one-time email OTP code to the registered address.
+ * Used during login when Email is the selected 2FA provider (provider=1).
+ */
+export async function sendEmailLoginCode(email: string, passwordHash: string): Promise<void> {
+  const body = new URLSearchParams();
+  body.set('email', email.toLowerCase());
+  body.set('masterPasswordHash', passwordHash);
+  const resp = await fetch('/api/two-factor/send-email-login', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      [WEB_SESSION_HEADER]: '1',
+    },
+    body: body.toString(),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_email_otp_send_failed')));
+  }
+}
+
+/**
+ * Submit an email OTP code during login (twoFactorProvider=1).
+ */
+export async function loginWithEmailCode(
+  email: string,
+  passwordHash: string,
+  emailCode: string,
+  rememberDevice: boolean
+): Promise<TokenSuccess | TokenError> {
+  const body = new URLSearchParams();
+  body.set('grant_type', 'password');
+  body.set('username', email.toLowerCase());
+  body.set('password', passwordHash);
+  body.set('scope', 'api offline_access');
+  body.set('deviceIdentifier', getOrCreateDeviceIdentifier());
+  body.set('deviceName', guessDeviceName());
+  body.set('deviceType', '14');
+  body.set('twoFactorProvider', '1');
+  body.set('twoFactorToken', emailCode.trim());
+  if (rememberDevice) {
+    body.set('twoFactorRemember', '1');
+  }
+  const resp = await fetch('/identity/connect/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      [WEB_SESSION_HEADER]: '1',
+    },
+    body: body.toString(),
+  });
+  const json = (await parseJson<TokenSuccess & TokenError>(resp)) || {};
+  if (resp.ok) {
+    saveRememberTwoFactorToken((json as TokenSuccess).TwoFactorToken);
+  }
+  if (!resp.ok) return json;
+  return json;
+}
+
+/**
+ * DELETE /api/two-factor/email
+ * Disable email 2FA for the current user. Requires masterPasswordHash.
+ */
+export async function disableEmailTwoFactor(
+  authedFetch: AuthedFetch,
+  masterPasswordHash: string
+): Promise<void> {
+  const resp = await authedFetch('/api/two-factor/email', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_email_mfa_disable_failed')));
+  }
+}
+
+/**
+ * POST /api/two-factor/send-email
+ * Trigger a setup verification code for the *authenticated* user.
+ * Used when enrolling Email 2FA from Settings (not from the login screen).
+ * Requires masterPasswordHash + target email to validate intent.
+ */
+export async function sendEmailSetupCode(
+  authedFetch: AuthedFetch,
+  email: string,
+  masterPasswordHash: string
+): Promise<void> {
+  const resp = await authedFetch('/api/two-factor/send-email', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, masterPasswordHash }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_email_mfa_setup_send_failed')));
+  }
+}
+
+/**
+ * PUT /api/two-factor/email
+ * Complete Email 2FA enrollment by submitting the verification code.
+ * Requires masterPasswordHash, email, and the OTP token.
+ */
+export async function enableEmailTwoFactor(
+  authedFetch: AuthedFetch,
+  email: string,
+  masterPasswordHash: string,
+  token: string
+): Promise<void> {
+  const resp = await authedFetch('/api/two-factor/email', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, masterPasswordHash, token }),
+  });
+  if (!resp.ok) {
+    const errBody = await parseJson<TokenError>(resp);
+    throw new Error(translateServerError(errBody?.error_description || errBody?.error, t('txt_email_mfa_setup_verify_failed')));
+  }
 }

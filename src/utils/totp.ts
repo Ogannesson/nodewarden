@@ -70,15 +70,24 @@ function normalizeToken(token: string): string {
   return token.replace(/\s+/g, '');
 }
 
-export async function verifyTotpToken(secretRaw: string, tokenRaw: string, nowMs: number = Date.now()): Promise<boolean> {
+/**
+ * Verify a TOTP token against a secret, allowing ±TOTP_WINDOW steps for clock drift.
+ *
+ * Returns the matched counter value (floor(nowMs/30000) + delta) on success, or null
+ * on failure. The caller can store this counter to prevent replay attacks: any
+ * subsequent code with counter ≤ stored value must be rejected.
+ *
+ * Constant-time: always evaluates all window positions regardless of which matched.
+ */
+export async function verifyTotpToken(secretRaw: string, tokenRaw: string, nowMs: number = Date.now()): Promise<number | null> {
   const token = normalizeToken(tokenRaw);
-  if (!/^\d{6}$/.test(token)) return false;
+  if (!/^\d{6}$/.test(token)) return null;
 
   const secret = base32Decode(secretRaw);
-  if (!secret) return false;
+  if (!secret) return null;
 
   const currentCounter = Math.floor(nowMs / 1000 / TOTP_STEP_SECONDS);
-  let matched = false;
+  let matchedCounter: number | null = null;
   for (let delta = -TOTP_WINDOW; delta <= TOTP_WINDOW; delta++) {
     const expected = await hotp(secret, currentCounter + delta);
     // Constant-time comparison: always check all windows, never short-circuit.
@@ -88,9 +97,9 @@ export async function verifyTotpToken(secretRaw: string, tokenRaw: string, nowMs
     for (let i = 0; i < a.length && i < b.length; i++) {
       diff |= a[i] ^ b[i];
     }
-    if (diff === 0) matched = true;
+    if (diff === 0) matchedCounter = currentCounter + delta;
   }
-  return matched;
+  return matchedCounter;
 }
 
 export function isTotpEnabled(secretRaw: string | undefined | null): boolean {

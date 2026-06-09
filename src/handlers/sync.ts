@@ -64,15 +64,21 @@ export async function handleSync(request: Request, env: Env, userId: string): Pr
     return cachedResponse;
   }
 
-  const [ciphers, folders, sends, attachmentsByCipher, domainSettings] = await Promise.all([
+  const [ciphers, folders, sends, attachmentsByCipher, domainSettings, twoFactorRows] = await Promise.all([
     storage.getAllCiphers(userId),
     storage.getAllFolders(userId),
     excludeSends ? Promise.resolve([]) : storage.getAllSends(userId),
     storage.getAttachmentsByUserId(userId),
     excludeDomains ? Promise.resolve(null) : storage.getUserDomainSettings(userId),
+    // C3: Load two_factors rows to accurately report twoFactorEnabled for non-TOTP providers.
+    storage.getTwoFactorsByUserId(userId),
   ]);
   const accountKeys = buildAccountKeys(user);
   const userDecryptionOptions = buildUserDecryptionOptions(user);
+  // C3: twoFactorEnabled is true if TOTP is active OR any other provider has an enabled row.
+  const twoFactorEnabled =
+    (!!user.totpSecret && user.totpEnabled !== false) ||
+    twoFactorRows.some(r => r.enabled && r.atype < 1000);
 
   const profile: ProfileResponse = {
     id: user.id,
@@ -84,7 +90,7 @@ export async function handleSync(request: Request, env: Env, userId: string): Pr
     usesKeyConnector: false,
     masterPasswordHint: user.masterPasswordHint,
     culture: 'en-US',
-    twoFactorEnabled: !!user.totpSecret,
+    twoFactorEnabled,
     key: user.key,
     privateKey: user.privateKey,
     accountKeys,

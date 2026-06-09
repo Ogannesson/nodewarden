@@ -1,3 +1,12 @@
+/**
+ * Minimal local type for Cloudflare Email Sending binding (env.EMAIL).
+ * Matches the Cloudflare Workers Email Sending API (send_email binding).
+ * Requires Workers Paid plan + verified sending domain.
+ */
+export interface CfEmailBinding {
+  send(msg: { from: string; to: string; subject: string; text: string; html?: string }): Promise<{ messageId?: string }>;
+}
+
 // Environment bindings
 export interface Env {
   DB: D1Database;
@@ -11,6 +20,34 @@ export interface Env {
   // Optional fallback for attachment/send file storage (no credit card required).
   ATTACHMENTS_KV?: KVNamespace;
   JWT_SECRET: string;
+  // WebAuthn relying-party config (#7 — no Host-header fallback). BOTH must be set
+  // for WebAuthn registration/authentication; if either is missing the server
+  // refuses WebAuthn (extractRpIdAndOrigin throws).
+  //   WEBAUTHN_RP_ID:  registrable domain, e.g. "vault.example.com"
+  //   WEBAUTHN_ORIGIN: full origin,        e.g. "https://vault.example.com"
+  WEBAUTHN_RP_ID?: string;
+  WEBAUTHN_ORIGIN?: string;
+  // Email 2FA (P2). At minimum MFA_EMAIL_FROM plus one sending backend must be set.
+  // If absent, isEmailSenderConfigured() returns false and Email 2FA is silently omitted.
+  MFA_EMAIL_FROM?: string;
+  // Cloudflare Email Sending binding (default backend). Declared via [[send_email]] in wrangler.toml.
+  EMAIL?: CfEmailBinding;
+  // Generic HTTP email backend selection: 'cloudflare' | 'http' | 'auto' (default).
+  MFA_EMAIL_PROVIDER?: string;
+  // Generic HTTP endpoint for transactional email (any flat-JSON API).
+  MFA_EMAIL_HTTP_ENDPOINT?: string;
+  // Authorization header value for the HTTP endpoint (e.g. "Bearer <token>").
+  MFA_EMAIL_HTTP_AUTH?: string;
+  // Extra headers as JSON object string (merged with Authorization if set).
+  MFA_EMAIL_HTTP_HEADERS?: string;
+  // Extra body fields as JSON object string (added to every send request).
+  MFA_EMAIL_HTTP_BODY?: string;
+  // Set to "1", "true", or "yes" to send the 'to' field as an array (some APIs require this).
+  MFA_EMAIL_HTTP_TO_ARRAY?: string;
+  // JSON body template for APIs with nested structures (e.g. from:{email:"{{from}}"}).
+  // When set, the flat-mode fields (MFA_EMAIL_HTTP_BODY / MFA_EMAIL_HTTP_TO_ARRAY / fieldMap)
+  // are ignored and the template drives the entire request body.
+  MFA_EMAIL_HTTP_BODY_TEMPLATE?: string;
 }
 
 export type UserRole = 'admin' | 'user';
@@ -49,7 +86,15 @@ export interface User {
   status: UserStatus;
   verifyDevices?: boolean;
   totpSecret: string | null;
+  /** Whether TOTP is actively enabled (separate from having a secret — allows reversible disable). */
+  totpEnabled: boolean;
   totpRecoveryCode: string | null;
+  /**
+   * Replay protection: the counter value (floor(nowMs/30000) + delta) of the last
+   * successfully verified TOTP code. A submitted code whose counter is ≤ this value
+   * is rejected. NULL means no TOTP login has been recorded yet.
+   */
+  totpLastCounter: number | null;
   apiKey: string | null;
   createdAt: string;
   updatedAt: string;

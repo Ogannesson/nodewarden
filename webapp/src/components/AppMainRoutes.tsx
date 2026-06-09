@@ -10,6 +10,7 @@ import type { CiphersImportPayload } from '@/lib/api/vault';
 import { t } from '@/lib/i18n';
 import type { AdminInvite, AdminUser, AuditLogListResult, AuditLogSettings, AuthorizedDevice, Cipher, CustomEquivalentDomain, DomainRules, Folder as VaultFolder, Profile, Send, SendDraft, SessionState, VaultDraft } from '@/lib/types';
 import type { ExportRequest } from '@/lib/export-formats';
+import type { WebAuthnKeyInfo } from '@/lib/api/auth';
 
 const VaultPage = lazy(() => import('@/components/VaultPage'));
 const SendsPage = lazy(() => import('@/components/SendsPage'));
@@ -123,6 +124,26 @@ export interface AppMainRoutesProps {
   onRemoveDevice: (device: AuthorizedDevice) => void;
   onRevokeAllDeviceTrust: () => void;
   onRemoveAllDevices: () => void;
+  webAuthnKeys: WebAuthnKeyInfo[];
+  webAuthnEnabled?: boolean;
+  webAuthnKeysLoading: boolean;
+  onRegisterWebAuthnKey: (masterPassword: string, keyName: string) => Promise<WebAuthnKeyInfo[]>;
+  onDeleteWebAuthnKey: (masterPassword: string, keyId: string) => Promise<void>;
+  onRenameWebAuthnKey?: (credentialId: string, name: string) => Promise<WebAuthnKeyInfo[]>;
+  onDisableAllWebAuthn?: (masterPassword: string) => Promise<void>;
+  onReEnableWebAuthn?: (masterPassword: string) => Promise<void>;
+  emailTwoFactorEnabled?: boolean;
+  emailTwoFactorConfigured?: boolean;
+  emailTwoFactorAvailable?: boolean;
+  emailTwoFactorEnrolledEmail?: string | null;
+  onDisableEmailTwoFactor?: (masterPassword: string) => Promise<void>;
+  onReEnableEmailTwoFactor?: (masterPassword: string, token?: string) => Promise<{ codeSent: boolean; email?: string | null }>;
+  onSendEmailSetupCode?: (email: string, masterPassword: string) => Promise<void>;
+  onEnableEmailTwoFactor?: (email: string, masterPassword: string, token: string) => Promise<void>;
+  emailTwoFactorQueryError?: boolean;
+  webAuthnKeysQueryError?: boolean;
+  totpConfigured?: boolean;
+  onReEnableTotp?: (masterPassword: string, token: string) => Promise<void>;
   onCreateInvite: (hours: number) => Promise<void>;
   onRefreshAdmin: () => void;
   onDeleteAllInvites: () => Promise<void>;
@@ -264,6 +285,26 @@ export default function AppMainRoutes(props: AppMainRoutesProps) {
                 onLockTimeoutChange={props.onLockTimeoutChange}
                 onSessionTimeoutActionChange={props.onSessionTimeoutActionChange}
                 onNotify={props.onNotify}
+                webAuthnKeys={props.webAuthnKeys}
+                webAuthnKeysLoading={props.webAuthnKeysLoading}
+                onRegisterWebAuthnKey={props.onRegisterWebAuthnKey}
+                onDeleteWebAuthnKey={props.onDeleteWebAuthnKey}
+                onRenameWebAuthnKey={props.onRenameWebAuthnKey}
+                onDisableAllWebAuthn={props.onDisableAllWebAuthn}
+                onReEnableWebAuthn={props.onReEnableWebAuthn}
+                webAuthnEnabled={props.webAuthnEnabled}
+                emailTwoFactorEnabled={props.emailTwoFactorEnabled}
+                emailTwoFactorConfigured={props.emailTwoFactorConfigured}
+                emailTwoFactorAvailable={props.emailTwoFactorAvailable}
+                emailTwoFactorEnrolledEmail={props.emailTwoFactorEnrolledEmail}
+                onDisableEmailTwoFactor={props.onDisableEmailTwoFactor}
+                onReEnableEmailTwoFactor={props.onReEnableEmailTwoFactor}
+                onSendEmailSetupCode={props.onSendEmailSetupCode}
+                onEnableEmailTwoFactor={props.onEnableEmailTwoFactor}
+                emailTwoFactorQueryError={props.emailTwoFactorQueryError}
+                webAuthnKeysQueryError={props.webAuthnKeysQueryError}
+                totpConfigured={props.totpConfigured}
+                onReEnableTotp={props.onReEnableTotp}
               />
             </Suspense>
           </div>

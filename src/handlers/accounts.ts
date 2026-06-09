@@ -7,8 +7,21 @@ import { jsonResponse, errorResponse } from '../utils/response';
 import { generateUUID } from '../utils/uuid';
 import { LIMITS } from '../config/limits';
 import { isTotpEnabled, verifyTotpToken } from '../utils/totp';
-import { createRecoveryCode, recoveryCodeEquals } from '../utils/recovery-code';
+import { createRecoveryCode, hashRecoveryCode, recoveryCodeEquals, sha256Hex } from '../utils/recovery-code';
 import { buildAccountKeys } from '../utils/user-decryption';
+import {
+  getTwoFactor,
+  upsertTwoFactor,
+  deleteTwoFactor,
+} from '../services/storage-two-factor-repo';
+import {
+  EMAIL_ENROLLMENT_ATYPE,
+  EMAIL_LOGIN_CHALLENGE_ATYPE,
+  generateNumericCode,
+  maskEmail,
+  CODE_TTL_S,
+} from '../services/two-factor/email-provider';
+import { buildEmailSenderFromEnv, isEmailSenderConfigured } from '../services/email-sender';
 
 // CONTRACT:
 // users.master_password_hash is server-side login verification only. It does
@@ -91,9 +104,13 @@ async function verifyUserSecret(
   return auth.verifyPassword(normalized, user.masterPasswordHash, user.email);
 }
 
-function toProfile(user: User, env: Env): ProfileResponse {
+function toProfile(user: User, env: Env, twoFactorRows: import('../services/storage-two-factor-repo').TwoFactorRow[] = []): ProfileResponse {
   void env;
   const accountKeys = buildAccountKeys(user);
+  // C3: twoFactorEnabled reflects any active provider, not just TOTP.
+  const twoFactorEnabled =
+    (!!user.totpSecret && user.totpEnabled !== false) ||
+    twoFactorRows.some(r => r.enabled && r.atype < 1000);
   return {
     id: user.id,
     name: user.name,
@@ -104,7 +121,7 @@ function toProfile(user: User, env: Env): ProfileResponse {
     usesKeyConnector: false,
     masterPasswordHint: user.masterPasswordHint,
     culture: 'en-US',
-    twoFactorEnabled: !!user.totpSecret,
+    twoFactorEnabled,
     key: user.key,
     privateKey: user.privateKey,
     accountKeys,
@@ -214,7 +231,9 @@ export async function handleRegister(request: Request, env: Env): Promise<Respon
     status: 'active',
     verifyDevices: true,
     totpSecret: null,
+    totpEnabled: true,
     totpRecoveryCode: null,
+    totpLastCounter: null,
     apiKey: null,
     createdAt: now,
     updatedAt: now,
@@ -351,15 +370,21 @@ export async function handleGetPasswordHint(request: Request, env: Env): Promise
 export async function handleGetProfile(request: Request, env: Env, userId: string): Promise<Response> {
   void request;
   const storage = new StorageService(env.DB);
-  const user = await storage.getUserById(userId);
+  const [user, twoFactorRows] = await Promise.all([
+    storage.getUserById(userId),
+    storage.getTwoFactorsByUserId(userId),
+  ]);
   if (!user) return errorResponse('User not found', 404);
-  return jsonResponse(toProfile(user, env));
+  return jsonResponse(toProfile(user, env, twoFactorRows));
 }
 
 // PUT /api/accounts/profile
 export async function handleUpdateProfile(request: Request, env: Env, userId: string): Promise<Response> {
   const storage = new StorageService(env.DB);
-  const user = await storage.getUserById(userId);
+  const [user, twoFactorRows] = await Promise.all([
+    storage.getUserById(userId),
+    storage.getTwoFactorsByUserId(userId),
+  ]);
   if (!user) return errorResponse('User not found', 404);
 
   let body: {
@@ -392,7 +417,7 @@ export async function handleUpdateProfile(request: Request, env: Env, userId: st
     },
   });
 
-  return jsonResponse(toProfile(user, env));
+  return jsonResponse(toProfile(user, env, twoFactorRows));
 }
 
 // PUT/POST /api/accounts/verify-devices
@@ -586,15 +611,20 @@ export async function handleGetTotpStatus(request: Request, env: Env, userId: st
   const user = await storage.getUserById(userId);
   if (!user) return errorResponse('User not found', 404);
 
+  const configured = isTotpEnabled(user.totpSecret);
   return jsonResponse({
-    enabled: !!user.totpSecret,
+    // enabled = actively requires TOTP on login (secret exists AND flag is on)
+    enabled: configured && user.totpEnabled !== false,
+    // configured = secret is stored (re-enable path exists without re-scanning QR)
+    configured,
     object: 'twoFactor',
   });
 }
 
 // PUT /api/accounts/totp
-// enable: { enabled: true, secret: "...", token: "123456" }
-// disable: { enabled: false, masterPasswordHash: "..." }
+// Initial setup:  { enabled: true, secret: "...", token: "123456" }
+// Re-enable:      { enabled: true, masterPasswordHash: "..." }  (no secret/token — uses retained secret)
+// Disable:        { enabled: false, masterPasswordHash: "..." }  (preserves secret, just marks disabled)
 export async function handleSetTotpStatus(request: Request, env: Env, userId: string): Promise<Response> {
   const storage = new StorageService(env.DB);
   const auth = new AuthService(env);
@@ -609,35 +639,86 @@ export async function handleSetTotpStatus(request: Request, env: Env, userId: st
   }
 
   if (body.enabled === true) {
-    const normalizedSecret = normalizeTotpSecret(body.secret || '');
-    if (!isTotpEnabled(normalizedSecret)) {
-      return errorResponse('Invalid TOTP secret', 400);
+    const hasSecret = !!(body.secret && normalizeTotpSecret(body.secret));
+    const hasToken = !!body.token;
+
+    if (hasSecret) {
+      // --- Initial setup path: new secret + token verification ---
+      const normalizedSecret = normalizeTotpSecret(body.secret || '');
+      if (!isTotpEnabled(normalizedSecret)) {
+        return errorResponse('Invalid TOTP secret', 400);
+      }
+      if (!hasToken) {
+        return errorResponse('TOTP token is required', 400);
+      }
+      // verifyTotpToken returns the matched counter (number) or null — compare to null
+      // explicitly rather than relying on falsiness (the counter contract is numeric).
+      const matchedCounter = await verifyTotpToken(normalizedSecret, body.token!);
+      if (matchedCounter === null) {
+        return errorResponse('Invalid TOTP token', 400);
+      }
+      user.totpSecret = normalizedSecret;
+      user.totpEnabled = true;
+      if (!user.totpRecoveryCode) {
+        // H4: Store hash, not plaintext. The code was previously shown to the user
+        // at TOTP-setup initiation; no need to re-display here.
+        user.totpRecoveryCode = await hashRecoveryCode(createRecoveryCode());
+      }
+      user.updatedAt = new Date().toISOString();
+      await storage.saveUser(user);
+      await storage.deleteRefreshTokensByUserId(user.id);
+      AuthService.invalidateUserCache(user.id);
+      await writeAuditEvent(storage, {
+        actorUserId: user.id,
+        action: 'account.totp.enable',
+        category: 'security',
+        level: 'security',
+        targetType: 'user',
+        targetId: user.id,
+        metadata: auditRequestMetadata(request),
+      });
+      // Note: the recovery code (plaintext) is surfaced to the user only via the
+      // dedicated GET /api/accounts/totp/recovery-code endpoint, which is called
+      // during setup before enabling. We intentionally do NOT return it here — the
+      // stored value is a hash and returning it would be a misleading dead field.
+      return jsonResponse({ enabled: true, object: 'twoFactor' });
     }
-    if (!body.token) {
-      return errorResponse('TOTP token is required', 400);
+
+    // --- Re-enable path: no new secret, just restore the existing one ---
+    if (!isTotpEnabled(user.totpSecret)) {
+      return errorResponse('TOTP is not configured. Please set up TOTP first by providing a secret and token.', 400);
     }
-    const verified = await verifyTotpToken(normalizedSecret, body.token);
-    if (!verified) {
+    if (!body.masterPasswordHash) {
+      return errorResponse('masterPasswordHash is required to re-enable TOTP', 400);
+    }
+    const validReEnable = await auth.verifyPassword(body.masterPasswordHash, user.masterPasswordHash, user.email);
+    if (!validReEnable) return errorResponse('Invalid password', 400);
+
+    // #11: require a live TOTP code (proof of current device possession), not just
+    // the master password — re-enabling a factor must prove the user still holds it.
+    const reEnableToken = String(body.token ?? '').trim();
+    if (!reEnableToken) {
+      return errorResponse('A current TOTP code is required to re-enable TOTP', 400);
+    }
+    if ((await verifyTotpToken(user.totpSecret!, reEnableToken)) === null) {
       return errorResponse('Invalid TOTP token', 400);
     }
-    user.totpSecret = normalizedSecret;
-    if (!user.totpRecoveryCode) {
-      user.totpRecoveryCode = createRecoveryCode();
-    }
+
+    user.totpEnabled = true;
     user.updatedAt = new Date().toISOString();
     await storage.saveUser(user);
     await storage.deleteRefreshTokensByUserId(user.id);
     AuthService.invalidateUserCache(user.id);
     await writeAuditEvent(storage, {
       actorUserId: user.id,
-      action: 'account.totp.enable',
+      action: 'account.totp.reenable',
       category: 'security',
       level: 'security',
       targetType: 'user',
       targetId: user.id,
       metadata: auditRequestMetadata(request),
     });
-    return jsonResponse({ enabled: true, recoveryCode: user.totpRecoveryCode, object: 'twoFactor' });
+    return jsonResponse({ enabled: true, object: 'twoFactor' });
   }
 
   if (body.enabled === false) {
@@ -647,7 +728,9 @@ export async function handleSetTotpStatus(request: Request, env: Env, userId: st
     const valid = await auth.verifyPassword(body.masterPasswordHash, user.masterPasswordHash, user.email);
     if (!valid) return errorResponse('Invalid password', 400);
 
-    user.totpSecret = null;
+    // Reversible disable: preserve secret, only flip the enabled flag.
+    // The user can re-enable without re-scanning the QR code.
+    user.totpEnabled = false;
     user.updatedAt = new Date().toISOString();
     await storage.saveUser(user);
     await storage.deleteRefreshTokensByUserId(user.id);
@@ -661,7 +744,8 @@ export async function handleSetTotpStatus(request: Request, env: Env, userId: st
       targetId: user.id,
       metadata: auditRequestMetadata(request),
     });
-    return jsonResponse({ enabled: false, object: 'twoFactor' });
+    // configured=true signals the front-end that re-enable is available without re-scan.
+    return jsonResponse({ enabled: false, configured: isTotpEnabled(user.totpSecret), object: 'twoFactor' });
   }
 
   return errorResponse('enabled must be true or false', 400);
@@ -693,13 +777,26 @@ export async function handleGetTotpRecoveryCode(request: Request, env: Env, user
   if (!valid) return errorResponse('Invalid password', 400);
 
   if (!user.totpRecoveryCode) {
-    user.totpRecoveryCode = createRecoveryCode();
+    // H4: First-time generation — create a new code, show plaintext to user once,
+    // store only the SHA-256 hash. The plaintext is never persisted.
+    const plainCode = createRecoveryCode();
+    user.totpRecoveryCode = await hashRecoveryCode(plainCode);
     user.updatedAt = new Date().toISOString();
     await storage.saveUser(user);
+    return jsonResponse({
+      code: plainCode,
+      object: 'twoFactorRecover',
+    });
   }
 
+  // H4: If a hash is already stored, the plaintext is unavailable server-side.
+  // Return an empty string — the client should prompt the user to regenerate
+  // their recovery code via the accounts.recover-2fa flow if they've lost it.
+  // (Legacy plaintext rows are still returned as-is for one final display before
+  //  the lazy-migration path upgrades them on next login.)
+  const isLegacyPlaintext = /^[A-Z2-7 ]+$/.test(user.totpRecoveryCode) && user.totpRecoveryCode.replace(/ /g, '').length === 32;
   return jsonResponse({
-    code: user.totpRecoveryCode,
+    code: isLegacyPlaintext ? user.totpRecoveryCode : '',
     object: 'twoFactorRecover',
   });
 }
@@ -757,16 +854,40 @@ export async function handleRecoverTwoFactor(request: Request, env: Env): Promis
     return errorResponse('Invalid credentials or recovery code', 400);
   }
 
-  if (!recoveryCodeEquals(recoveryCode, user.totpRecoveryCode)) {
+  // H4: recoveryCodeEquals is now async and returns { match, upgradedHash? }.
+  // H5: capture stored code BEFORE comparison to close TOCTOU window.
+  const oldStoredCode = user.totpRecoveryCode;
+  const rcVerify = await recoveryCodeEquals(recoveryCode, oldStoredCode);
+  if (!rcVerify.match) {
     await rateLimit.recordFailedLogin(recoverLimitKey);
     return errorResponse('Invalid credentials or recovery code', 400);
   }
 
-  user.totpSecret = null;
-  user.totpRecoveryCode = createRecoveryCode();
-  user.securityStamp = generateUUID();
-  user.updatedAt = new Date().toISOString();
-  await storage.saveUser(user);
+  // Recovery code = destructive escape hatch: wipe ALL 2FA providers.
+  // Rotate the recovery code (one-time use): keep the plaintext to return to the
+  // caller, persist only the hash. (Bug fix: the plaintext used to be discarded and
+  // the hash returned, leaving the rotated recovery code unusable for the user.)
+  const rotatedRecoveryCode = createRecoveryCode();
+  const newHashedCode = await hashRecoveryCode(rotatedRecoveryCode);
+  const newSecurityStamp = generateUUID();
+  const updatedAt = new Date().toISOString();
+
+  // H5: atomic rotate — UPDATE ... SET totp_recovery_code = ?, totp_secret = NULL,
+  // totp_enabled = 1, security_stamp = ?, updated_at = ? WHERE totp_recovery_code = <old>.
+  // Returns false (changes === 0) when a concurrent request beat us to it.
+  const rotated = await storage.atomicRotateRecoveryCode(
+    user.id,
+    oldStoredCode!,
+    newHashedCode,
+    newSecurityStamp,
+    updatedAt,
+  );
+  if (!rotated) {
+    await rateLimit.recordFailedLogin(recoverLimitKey);
+    return errorResponse('Invalid credentials or recovery code', 400);
+  }
+  // Also destroy WebAuthn and Email rows (full wipe, not just disable).
+  await storage.deleteAllTwoFactorsByUserId(user.id);
   await storage.deleteRefreshTokensByUserId(user.id);
   AuthService.invalidateUserCache(user.id);
   await rateLimit.clearLoginAttempts(recoverLimitKey);
@@ -783,7 +904,7 @@ export async function handleRecoverTwoFactor(request: Request, env: Env): Promis
   return jsonResponse({
     success: true,
     twoFactorEnabled: false,
-    newRecoveryCode: user.totpRecoveryCode,
+    newRecoveryCode: rotatedRecoveryCode,
     object: 'twoFactorRecovery',
   });
 }
@@ -887,6 +1008,796 @@ async function apiKey(request: Request, env: Env, userId: string, rotate: boolea
     apiKey: user.apiKey,
     revisionDate: user.updatedAt,
     object: 'apiKey',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// WebAuthn (FIDO2) management endpoints
+// ---------------------------------------------------------------------------
+
+import {
+  generateRegistrationChallenge,
+  completeRegistration,
+  listCredentials,
+  deleteCredential,
+  renameCredential,
+  disableAllWebAuthn,
+  reenableAllWebAuthn,
+  webAuthnProvider,
+} from '../services/two-factor/webauthn-provider';
+import { WebAuthnConfigError } from '../utils/passkey';
+
+/**
+ * GET /api/two-factor/webauthn
+ * Returns the registration challenge options + list of existing credentials.
+ * Bitwarden-compatible: also accepts GET /api/two-factor/get-webauthn.
+ */
+export async function handleGetWebAuthnChallenge(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  // Master password校验是可选的：仅当请求携带 masterPasswordHash 时才验证。
+  //
+  // 设计说明（BUG-BE-1 修复，Option A）：
+  //   - 强制校验已移至 handleRegisterWebAuthn（attestation POST）。
+  //   - GET challenge 本身无主密码也无害：没有 attestation 步骤就无法完成注册，
+  //     即使攻击者拿到 challenge，也无法在没有用户设备私钥的情况下伪造 attestation。
+  //   - HTTP GET 传 body 会被代理/CDN（如 Cloudflare）丢弃，不可靠；
+  //     前端 getWebAuthnChallenge() 发的是无 body 的 GET，不能要求必须有 masterPasswordHash。
+  //   - 若客户端自愿附带主密码（如某些第三方客户端），仍做验证以提供额外防御层。
+  let body: Record<string, string | undefined> = {};
+  try {
+    const contentType = request.headers.get('content-type') || '';
+    if (contentType.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries()) as Record<string, string>;
+    } else if (request.method !== 'GET') {
+      body = await request.json();
+    }
+  } catch { /* ignored — body is optional for this endpoint */ }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  // Optional: only verify if the client provided a master password hash.
+  if (masterPasswordHash) {
+    const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+    if (!valid) return errorResponse('Invalid password', 400);
+  }
+
+  const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
+  const existingCredentials = listCredentials(twoFactorRows);
+
+  // Build the registration challenge, but degrade gracefully when WebAuthn rpId/origin
+  // is not configured (#7 makes extractRpIdAndOrigin throw a WebAuthnConfigError). In that
+  // case we still return the existing keys + enabled status so the UI can show them and the
+  // re-enable entry point; only "register a new credential" is unavailable. Any OTHER error
+  // (DB, parse, …) is re-thrown so it surfaces as a real failure instead of being masked.
+  let options: Record<string, unknown>;
+  try {
+    options = await generateRegistrationChallenge(env.DB, user, env, existingCredentials);
+  } catch (err) {
+    if (!(err instanceof WebAuthnConfigError)) throw err;
+    options = { status: 'error', errorMessage: 'WebAuthn not configured' };
+  }
+
+  // Surface enabled status so the front-end can distinguish:
+  //   enabled=true, retainedCredentials>0  → active
+  //   enabled=false, retainedCredentials>0 → soft-disabled, re-enable available
+  //   enabled=false, retainedCredentials=0 → fully disabled / never set up
+  const webAuthnRow = twoFactorRows.find(r => r.atype === 7 /* TwoFactorType.WebAuthn */);
+  const webAuthnEnabled = !!(webAuthnRow?.enabled);
+
+  return jsonResponse({
+    ...options,
+    enabled: webAuthnEnabled,
+    keys: existingCredentials.map(c => ({
+      id: c.id,
+      name: c.name,
+      createdAt: c.createdAt,
+      transports: c.transports,
+      attachment: c.attachment,
+    })),
+    object: 'twoFactorWebAuthn',
+  });
+}
+
+/**
+ * POST /api/two-factor/webauthn
+ * Complete WebAuthn credential registration.
+ */
+export async function handleRegisterWebAuthn(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, unknown>;
+  try {
+    const contentType = request.headers.get('content-type') || '';
+    if (contentType.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries()) as Record<string, string>;
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  try {
+    const credential = await completeRegistration(
+      env.DB,
+      user,
+      {
+        id: String(body.id ?? ''),
+        rawId: String(body.rawId ?? body.id ?? ''),
+        type: String(body.type ?? 'public-key'),
+        response: body.response as Record<string, string> | undefined,
+        deviceName: String(body.name ?? body.deviceName ?? ''),
+        transports: Array.isArray(body.transports) ? body.transports as string[] : undefined,
+        attachment: body.attachment ? String(body.attachment) : undefined,
+      },
+      env
+    );
+
+    // Ensure the account has a recovery code now that WebAuthn is enabled.
+    // The recovery code is account-level (not TOTP-specific): it acts as an
+    // escape hatch to disable ALL 2FA providers at once (Bitwarden semantics).
+    // H4: Store hash only; the user retrieves plaintext via the recover endpoint.
+    if (!user.totpRecoveryCode) {
+      user.totpRecoveryCode = await hashRecoveryCode(createRecoveryCode());
+      user.updatedAt = new Date().toISOString();
+      await storage.saveUser(user);
+    }
+
+    // C1: Revoke existing sessions after adding a new 2FA provider so that stale
+    // sessions (which pre-date the new factor) cannot be used without re-authentication.
+    await storage.deleteRefreshTokensByUserId(userId);
+    AuthService.invalidateUserCache(userId);
+
+    await safeWriteAuditEvent(env, {
+      actorUserId: userId,
+      action: 'account.webauthn.register',
+      category: 'security',
+      level: 'info',
+      targetType: 'webauthn_credential',
+      targetId: credential.id,
+      metadata: auditRequestMetadata(request),
+    });
+
+    const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
+    const allCredentials = listCredentials(twoFactorRows);
+    return jsonResponse({
+      id: credential.id,
+      name: credential.name,
+      createdAt: credential.createdAt,
+      transports: credential.transports,
+      attachment: credential.attachment,
+      keys: allCredentials.map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt, transports: c.transports, attachment: c.attachment })),
+      object: 'twoFactorWebAuthn',
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Registration failed';
+    return errorResponse(msg, 400);
+  }
+}
+
+/**
+ * DELETE /api/two-factor/webauthn
+ * Two modes:
+ *   - With credentialId/id in body: remove a single credential (requires masterPasswordHash).
+ *   - Without credentialId/id: disable ALL WebAuthn credentials (requires masterPasswordHash).
+ */
+export async function handleDeleteWebAuthn(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, string | undefined>;
+  try {
+    const contentType = request.headers.get('content-type') || '';
+    if (contentType.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries()) as Record<string, string>;
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  const credentialId = String(body.id ?? body.credentialId ?? '').trim();
+
+  // Bulk disable: no credentialId → disable all WebAuthn credentials
+  if (!credentialId) {
+    await disableAllWebAuthn(env.DB, userId);
+    await safeWriteAuditEvent(env, {
+      actorUserId: userId,
+      action: 'account.webauthn.disable_all',
+      category: 'security',
+      level: 'security',
+      targetType: 'webauthn_credential',
+      targetId: '',
+      metadata: auditRequestMetadata(request),
+    });
+    return jsonResponse({ keys: [], object: 'twoFactorWebAuthn' });
+  }
+
+  const deleted = await deleteCredential(env.DB, userId, credentialId);
+  if (!deleted) return errorResponse('Credential not found', 404);
+
+  await safeWriteAuditEvent(env, {
+    actorUserId: userId,
+    action: 'account.webauthn.delete',
+    category: 'security',
+    level: 'security',
+    targetType: 'webauthn_credential',
+    targetId: credentialId,
+    metadata: auditRequestMetadata(request),
+  });
+
+  const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
+  const remaining = listCredentials(twoFactorRows);
+  return jsonResponse({
+    keys: remaining.map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt, transports: c.transports, attachment: c.attachment })),
+    object: 'twoFactorWebAuthn',
+  });
+}
+
+/**
+ * POST /api/two-factor/webauthn/reenable
+ * Re-enable WebAuthn after a reversible disable (disableAllWebAuthn).
+ * Requires masterPasswordHash. Credentials are preserved — no re-registration needed.
+ *
+ * Body: { masterPasswordHash: string }
+ */
+export async function handleReenableWebAuthn(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, unknown>;
+  try {
+    const ct = request.headers.get('content-type') ?? '';
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries());
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  // #11: re-enabling WebAuthn must prove live possession of an existing credential,
+  // not just the master password. Credentials remain stored while disabled, so
+  // buildChallenge/verify work against them. Two-phase on this endpoint:
+  //   - no assertion -> phase 1: return a WebAuthn assertion challenge
+  //   - assertion    -> phase 2: verify it, then re-enable
+  const reenableRows = await storage.getTwoFactorsByUserId(userId);
+  const webAuthnCtx = { user, env, db: env.DB, twoFactorRows: reenableRows, request };
+
+  const assertion = body.token ?? body.assertion ?? body.deviceResponse;
+  if (!assertion) {
+    let options: Record<string, unknown>;
+    try {
+      options = (await webAuthnProvider.buildChallenge(webAuthnCtx)) as Record<string, unknown>;
+    } catch (err) {
+      // Only a missing/invalid WebAuthn rpId/origin config is a client-actionable 400.
+      // Re-throw anything else (DB failure, etc.) so it is not masked as a config issue.
+      if (!(err instanceof WebAuthnConfigError)) throw err;
+      return errorResponse('WebAuthn is not available or not configured', 400);
+    }
+    return jsonResponse({ ...options, object: 'twoFactorWebAuthnReenableChallenge' });
+  }
+
+  const assertionJson = typeof assertion === 'string' ? assertion : JSON.stringify(assertion);
+  const assertionVerified = await webAuthnProvider.verify(webAuthnCtx, assertionJson);
+  if (!assertionVerified) {
+    return errorResponse('WebAuthn verification failed', 400);
+  }
+
+  const reenabled = await reenableAllWebAuthn(env.DB, userId);
+  if (!reenabled) {
+    return errorResponse('No retained WebAuthn credentials found. Please register a new credential.', 400);
+  }
+  await storage.deleteRefreshTokensByUserId(userId);
+  AuthService.invalidateUserCache(userId);
+
+  await safeWriteAuditEvent(env, {
+    actorUserId: userId,
+    action: 'account.webauthn.reenable',
+    category: 'security',
+    level: 'security',
+    targetType: 'webauthn_credential',
+    targetId: '',
+    metadata: auditRequestMetadata(request),
+  });
+
+  const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
+  const credentials = listCredentials(twoFactorRows);
+  return jsonResponse({
+    enabled: true,
+    keys: credentials.map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt, transports: c.transports, attachment: c.attachment })),
+    object: 'twoFactorWebAuthn',
+  });
+}
+
+/**
+ * PUT /api/two-factor/webauthn
+ * Rename a registered WebAuthn credential.
+ * Requires only login authentication (not masterPasswordHash — renaming is cosmetic).
+ */
+export async function handleRenameWebAuthn(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, unknown>;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON', 400);
+  }
+
+  const credentialId = String(body.credentialId ?? '').trim();
+  const name = String(body.name ?? '').trim();
+  if (!credentialId) return errorResponse('credentialId is required', 400);
+  if (!name) return errorResponse('name is required', 400);
+
+  const renamed = await renameCredential(env.DB, userId, credentialId, name);
+  if (!renamed) return errorResponse('Credential not found', 404);
+
+  const twoFactorRows = await storage.getTwoFactorsByUserId(userId);
+  const keys = listCredentials(twoFactorRows).map(c => ({
+    id: c.id,
+    name: c.name,
+    createdAt: c.createdAt,
+    transports: c.transports,
+    attachment: c.attachment,
+  }));
+  return jsonResponse({ keys, object: 'twoFactorWebAuthn' });
+}
+
+// ---------------------------------------------------------------------------
+// Email 2FA management endpoints (P2)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/two-factor/email
+ * Returns the current Email 2FA status and the masked enrolled email (if any).
+ * Also triggers sending a fresh code to the enrolled email (for setup/verify flow).
+ */
+export async function handleGetEmailTwoFactor(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  // available = email provider is configured (MFA_EMAIL_FROM + at least one sending backend)
+  const available = isEmailSenderConfigured(env);
+
+  const row = await getTwoFactor(env.DB, userId, EMAIL_ENROLLMENT_ATYPE);
+  const enabled = row?.enabled ?? false;
+  // configured=true even when disabled, as long as the enrollment row exists.
+  // Allows front-end to show "re-enable" instead of "set up".
+  const configured = !!row;
+  const enrolledEmail = row ? (JSON.parse(row.data) as { email: string }).email : null;
+
+  return jsonResponse({
+    enabled,
+    available,
+    configured,
+    email: enrolledEmail ? maskEmail(enrolledEmail) : null,
+    object: 'twoFactorEmail',
+  });
+}
+
+/**
+ * POST /api/two-factor/send-email
+ * Already-authenticated user triggers sending a verification code to their email
+ * (used during 2FA enrollment setup flow).
+ *
+ * Body: { email, masterPasswordHash }
+ */
+export async function handleSendEmailSetup(request: Request, env: Env, userId: string): Promise<Response> {
+  if (!isEmailSenderConfigured(env)) {
+    return errorResponse('Email 2FA is not configured on this server', 503);
+  }
+
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const rateLimit = new RateLimitService(env.DB);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  // Per-user send budget: limit to 5 sends per 10 minutes.
+  const sendBudget = await rateLimit.consumeBudgetWithWindow(`${userId}:email-setup-send`, 5, 600);
+  if (!sendBudget.allowed) {
+    return errorResponse('Too many email verification requests. Please try again later.', 429);
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    const ct = request.headers.get('content-type') ?? '';
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries());
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid request body', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  const targetEmail = String(body.email ?? '').trim().toLowerCase();
+  if (!targetEmail || !targetEmail.includes('@')) return errorResponse('Valid email is required', 400);
+
+  // Generate + store challenge.
+  const code = generateNumericCode();
+  await upsertTwoFactor(env.DB, {
+    userId,
+    atype: EMAIL_LOGIN_CHALLENGE_ATYPE,
+    enabled: true,
+    // #8: store the OTP hashed (plaintext is only used to send the email below).
+    // #12: bind the challenge to the target email so a code sent to A cannot enroll B.
+    data: JSON.stringify({ code: await sha256Hex(code), createdAt: Date.now(), attempts: 0, targetEmail }),
+    lastUsed: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  // Send code — failure MUST surface.
+  const sender = buildEmailSenderFromEnv(env);
+  if (!sender) return errorResponse('Email sender not configured', 503);
+  try {
+    await sender.send({
+      to: targetEmail,
+      subject: 'Your NodeWarden verification code',
+      text: [
+        `Your NodeWarden verification code is: ${code}`,
+        '',
+        `This code expires in ${CODE_TTL_S / 60} minutes and can only be used once.`,
+        'If you did not request this code, please secure your account immediately.',
+      ].join('\n'),
+    });
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ Message: `Failed to send verification email: ${err instanceof Error ? err.message : String(err)}` }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
+
+/**
+ * PUT /api/two-factor/email
+ * Enable Email 2FA: verify the code sent to the target email, then enroll.
+ *
+ * Body: { email, masterPasswordHash, token }
+ */
+export async function handleEnableEmailTwoFactor(request: Request, env: Env, userId: string): Promise<Response> {
+  if (!isEmailSenderConfigured(env)) {
+    return errorResponse('Email 2FA is not configured on this server', 503);
+  }
+
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, unknown>;
+  try {
+    const ct = request.headers.get('content-type') ?? '';
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries());
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid request body', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  const targetEmail = String(body.email ?? '').trim().toLowerCase();
+  if (!targetEmail || !targetEmail.includes('@')) return errorResponse('Valid email is required', 400);
+
+  const token = String(body.token ?? '').trim();
+  if (!token) return errorResponse('Verification token is required', 400);
+
+  // Verify the pending setup challenge.
+  const challengeRow = await getTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+  if (!challengeRow) return errorResponse('No pending verification code. Please request a new code.', 400);
+
+  const challenge = JSON.parse(challengeRow.data) as { code: string; createdAt: number; attempts: number; targetEmail?: string };
+  const ageMs = Date.now() - challenge.createdAt;
+  if (ageMs > CODE_TTL_S * 1000) {
+    await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    return errorResponse('Verification code has expired. Please request a new code.', 400);
+  }
+
+  // Constant-time comparison.
+  const enc = new TextEncoder();
+  const { timingSafeEqual } = await import('../utils/passkey');
+  const match = await timingSafeEqual(enc.encode(await sha256Hex(token)), enc.encode(challenge.code));
+  if (!match) {
+    const newAttempts = challenge.attempts + 1;
+    if (newAttempts >= 3) {
+      await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    } else {
+      await upsertTwoFactor(env.DB, {
+        ...challengeRow,
+        data: JSON.stringify({ ...challenge, attempts: newAttempts }),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    return errorResponse('Invalid verification code', 400);
+  }
+
+  // #12: bind the OTP to the address it was sent to — reject enrolling a different
+  // email than the one that received the code (or any legacy challenge without targetEmail).
+  if (!challenge.targetEmail || challenge.targetEmail !== targetEmail) {
+    await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    return errorResponse('Email does not match the address the code was sent to', 400);
+  }
+
+  // Delete the setup challenge and enroll.
+  await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+  await upsertTwoFactor(env.DB, {
+    userId,
+    atype: EMAIL_ENROLLMENT_ATYPE,
+    enabled: true,
+    data: JSON.stringify({ email: targetEmail }),
+    lastUsed: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  // Ensure account-level recovery code exists.
+  // H4: Store hash only; the user retrieves plaintext via the recover endpoint.
+  if (!user.totpRecoveryCode) {
+    user.totpRecoveryCode = await hashRecoveryCode(createRecoveryCode());
+    user.updatedAt = new Date().toISOString();
+    await storage.saveUser(user);
+  }
+
+  // C1: Revoke existing sessions after enabling a new 2FA provider so that stale
+  // sessions (which pre-date this factor) must re-authenticate with the new factor.
+  await storage.deleteRefreshTokensByUserId(userId);
+  AuthService.invalidateUserCache(userId);
+
+  await safeWriteAuditEvent(env, {
+    actorUserId: userId,
+    action: 'account.email2fa.enable',
+    category: 'security',
+    level: 'security',
+    targetType: 'user',
+    targetId: userId,
+    metadata: auditRequestMetadata(request),
+  });
+
+  return jsonResponse({
+    enabled: true,
+    email: maskEmail(targetEmail),
+    object: 'twoFactorEmail',
+  });
+}
+
+/**
+ * DELETE /api/two-factor/email
+ * Disable Email 2FA for this user.
+ *
+ * Body: { masterPasswordHash }
+ */
+export async function handleDisableEmailTwoFactor(request: Request, env: Env, userId: string): Promise<Response> {
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, unknown>;
+  try {
+    const ct = request.headers.get('content-type') ?? '';
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries());
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid request body', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  // Reversible disable: set enabled=0 but keep the enrollment row so the
+  // user can re-enable (handleReenableEmailTwoFactor) without re-setup.
+  const enrollmentRow = await getTwoFactor(env.DB, userId, EMAIL_ENROLLMENT_ATYPE);
+  if (enrollmentRow) {
+    await upsertTwoFactor(env.DB, {
+      ...enrollmentRow,
+      enabled: false,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+  // Clean up any stale challenge row.
+  await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+
+  await safeWriteAuditEvent(env, {
+    actorUserId: userId,
+    action: 'account.email2fa.disable',
+    category: 'security',
+    level: 'security',
+    targetType: 'user',
+    targetId: userId,
+    metadata: auditRequestMetadata(request),
+  });
+
+  // configured=true signals that enrollment data is retained for re-enable.
+  const configured = !!enrollmentRow;
+  return jsonResponse({ enabled: false, configured, email: null, object: 'twoFactorEmail' });
+}
+
+/**
+ * POST /api/two-factor/email/reenable
+ * Re-enable Email 2FA after a reversible disable.
+ * Requires masterPasswordHash. The enrolled email is preserved — no re-setup needed.
+ *
+ * Body: { masterPasswordHash: string }
+ */
+export async function handleReenableEmailTwoFactor(request: Request, env: Env, userId: string): Promise<Response> {
+  if (!isEmailSenderConfigured(env)) {
+    return errorResponse('Email 2FA is not configured on this server', 503);
+  }
+
+  const storage = new StorageService(env.DB);
+  const auth = new AuthService(env);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse('User not found', 404);
+
+  let body: Record<string, unknown>;
+  try {
+    const ct = request.headers.get('content-type') ?? '';
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      const fd = await request.formData();
+      body = Object.fromEntries(fd.entries());
+    } else {
+      body = await request.json();
+    }
+  } catch {
+    return errorResponse('Invalid request body', 400);
+  }
+
+  const masterPasswordHash = String(body.masterPasswordHash ?? body.master_password_hash ?? '').trim();
+  if (!masterPasswordHash) return errorResponse('masterPasswordHash is required', 400);
+  const valid = await auth.verifyPassword(masterPasswordHash, user.masterPasswordHash, user.email);
+  if (!valid) return errorResponse('Invalid password', 400);
+
+  const enrollmentRow = await getTwoFactor(env.DB, userId, EMAIL_ENROLLMENT_ATYPE);
+  if (!enrollmentRow) {
+    return errorResponse('Email 2FA is not configured. Please set it up first.', 400);
+  }
+  const enrollment = JSON.parse(enrollmentRow.data) as { email: string };
+
+  // #11: re-enabling Email 2FA must prove live control of the enrolled address,
+  // not just the master password. Two-phase on this same endpoint:
+  //   - no token  -> phase 1: send a fresh code to the enrolled address
+  //   - token     -> phase 2: verify the code, then re-enable
+  const token = String(body.token ?? '').trim();
+
+  if (!token) {
+    const code = generateNumericCode();
+    await upsertTwoFactor(env.DB, {
+      userId,
+      atype: EMAIL_LOGIN_CHALLENGE_ATYPE,
+      enabled: true,
+      // #8 hashed code, #12 bound to the enrolled address.
+      data: JSON.stringify({ code: await sha256Hex(code), createdAt: Date.now(), attempts: 0, targetEmail: enrollment.email }),
+      lastUsed: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const sender = buildEmailSenderFromEnv(env);
+    if (!sender) return errorResponse('Email sender not configured', 503);
+    try {
+      await sender.send({
+        to: enrollment.email,
+        subject: 'Your NodeWarden verification code',
+        text: [
+          `Your NodeWarden verification code is: ${code}`,
+          '',
+          `This code expires in ${CODE_TTL_S / 60} minutes and can only be used once.`,
+        ].join('\n'),
+      });
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ Message: `Failed to send verification email: ${err instanceof Error ? err.message : String(err)}` }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return jsonResponse({ codeSent: true, email: maskEmail(enrollment.email), object: 'twoFactorEmailReenableChallenge' });
+  }
+
+  // Phase 2: verify the emailed code against the bound challenge.
+  const challengeRow = await getTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+  if (!challengeRow) return errorResponse('No pending verification code. Please request a new code.', 400);
+  const challenge = JSON.parse(challengeRow.data) as { code: string; createdAt: number; attempts: number; targetEmail?: string };
+  if (Date.now() - challenge.createdAt > CODE_TTL_S * 1000) {
+    await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    return errorResponse('Verification code has expired. Please request a new code.', 400);
+  }
+  const enc = new TextEncoder();
+  const { timingSafeEqual } = await import('../utils/passkey');
+  const codeMatch = await timingSafeEqual(enc.encode(await sha256Hex(token)), enc.encode(challenge.code));
+  if (!codeMatch) {
+    const newAttempts = challenge.attempts + 1;
+    if (newAttempts >= 3) {
+      await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    } else {
+      await upsertTwoFactor(env.DB, { ...challengeRow, data: JSON.stringify({ ...challenge, attempts: newAttempts }), updatedAt: new Date().toISOString() });
+    }
+    return errorResponse('Invalid verification code', 400);
+  }
+  if (challenge.targetEmail !== enrollment.email) {
+    await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+    return errorResponse('Verification target mismatch', 400);
+  }
+  await deleteTwoFactor(env.DB, userId, EMAIL_LOGIN_CHALLENGE_ATYPE);
+
+  // Restore enabled flag — enrollment data (email address) is already there.
+  await upsertTwoFactor(env.DB, {
+    ...enrollmentRow,
+    enabled: true,
+    updatedAt: new Date().toISOString(),
+  });
+  await storage.deleteRefreshTokensByUserId(userId);
+  AuthService.invalidateUserCache(userId);
+
+  await safeWriteAuditEvent(env, {
+    actorUserId: userId,
+    action: 'account.email2fa.reenable',
+    category: 'security',
+    level: 'security',
+    targetType: 'user',
+    targetId: userId,
+    metadata: auditRequestMetadata(request),
+  });
+
+  return jsonResponse({
+    enabled: true,
+    email: maskEmail(enrollment.email),
+    object: 'twoFactorEmail',
   });
 }
 
