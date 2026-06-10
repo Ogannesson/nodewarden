@@ -735,6 +735,7 @@ const en: Record<string, string> = {
   "txt_status": "Status",
   "txt_online": "Online",
   "txt_offline": "Offline",
+  "txt_offline_vault_readonly": "Offline mode is read-only. Connect to NodeWarden before changing your vault.",
   "txt_submit": "Submit",
   "txt_sync": "Sync",
   "txt_sync_vault": "Sync Vault",

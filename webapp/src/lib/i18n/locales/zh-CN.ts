@@ -735,6 +735,7 @@ const zhCN: Record<string, string> = {
   "txt_status": "状态",
   "txt_online": "在线",
   "txt_offline": "离线",
+  "txt_offline_vault_readonly": "当前为离线模式，只能查看密码库。连接到 NodeWarden 后才能修改。",
   "txt_submit": "提交",
   "txt_sync": "同步",
   "txt_sync_vault": "同步",

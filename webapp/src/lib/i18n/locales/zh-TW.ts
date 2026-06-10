@@ -735,6 +735,7 @@ const zhTW: Record<string, string> = {
   "txt_status": "狀態",
   "txt_online": "在線",
   "txt_offline": "離線",
+  "txt_offline_vault_readonly": "目前為離線模式，只能查看密碼庫。連線到 NodeWarden 後才能修改。",
   "txt_submit": "提交",
   "txt_sync": "同步",
   "txt_sync_vault": "同步",

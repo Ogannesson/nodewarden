@@ -735,6 +735,7 @@ const ru: Record<string, string> = {
   "txt_status": "Статус",
   "txt_online": "Онлайн",
   "txt_offline": "Офлайн",
+  "txt_offline_vault_readonly": "Автономный режим доступен только для чтения. Подключитесь к NodeWarden, чтобы изменить хранилище.",
   "txt_submit": "Отправить",
   "txt_sync": "Синхронизировать",
   "txt_sync_vault": "Синхронизировать хранилище",

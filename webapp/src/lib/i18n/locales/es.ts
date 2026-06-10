@@ -735,6 +735,7 @@ const es: Record<string, string> = {
   "txt_status": "Estado",
   "txt_online": "En línea",
   "txt_offline": "Sin conexión",
+  "txt_offline_vault_readonly": "El modo sin conexión es de solo lectura. Conecta con NodeWarden antes de cambiar la bóveda.",
   "txt_submit": "Enviar",
   "txt_sync": "Sincronizar",
   "txt_sync_vault": "Sincronizar bóveda",
