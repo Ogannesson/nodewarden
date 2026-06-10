@@ -890,6 +890,27 @@ export default function App() {
     }
   }
 
+  /**
+   * Reset every pending-2FA challenge and its associated transient input/flags.
+   * pendingTotp / pendingWebAuthn / pendingEmail each hold the in-memory masterKey
+   * and passwordHash, so any lock/logout/recovery transition MUST clear all three —
+   * dropping one (historically pendingEmail) leaks those secrets into the next phase.
+   */
+  function clearAllPending2fa() {
+    setPendingTotp(null);
+    setPendingTotpMode(null);
+    setTotpCode('');
+    setPendingWebAuthn(null);
+    setPendingWebAuthnMode(null);
+    setWebAuthnSubmitting(false);
+    setPendingEmail(null);
+    setPendingEmailMode(null);
+    setEmailOtpCode('');
+    setEmailOtpRememberDevice(true);
+    setEmailOtpResending(false);
+    setEmailOtpSubmitting(false);
+  }
+
   function lockCurrentSession() {
     const currentSession = sessionRef.current;
     if (!currentSession) return;
@@ -902,12 +923,7 @@ export default function App() {
     setDecryptedCiphers([]);
     setDecryptedSends([]);
     setUnlockPassword('');
-    setPendingTotp(null);
-    setPendingTotpMode(null);
-    setPendingWebAuthn(null);
-    setPendingWebAuthnMode(null);
-    setWebAuthnSubmitting(false);
-    setTotpCode('');
+    clearAllPending2fa();
     setUnlockPreparing(false);
     setPhase('locked');
     navigate('/lock');
@@ -927,11 +943,7 @@ export default function App() {
     clearOfflineUnlockRecord();
     setProfile(null);
     setUnlockPreparing(false);
-    setPendingTotp(null);
-    setPendingTotpMode(null);
-    setPendingWebAuthn(null);
-    setPendingWebAuthnMode(null);
-    setWebAuthnSubmitting(false);
+    clearAllPending2fa();
     setPhase('login');
     navigate('/login');
   }
@@ -1968,13 +1980,8 @@ export default function App() {
             setRememberDevice(true);
           }}
           onUseRecoveryCode={() => {
-            if (totpSubmitting || webAuthnSubmitting) return;
-            setPendingTotp(null);
-            setPendingTotpMode(null);
-            setPendingWebAuthn(null);
-            setPendingWebAuthnMode(null);
-            setWebAuthnSubmitting(false);
-            setTotpCode('');
+            if (totpSubmitting || webAuthnSubmitting || emailOtpSubmitting) return;
+            clearAllPending2fa();
             setRememberDevice(true);
             navigate('/recover-2fa');
           }}

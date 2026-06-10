@@ -105,7 +105,7 @@ import {
   MAX_ATTEMPTS,
 } from '../../services/two-factor/email-provider';
 import { handleSendEmailLogin } from '../identity';
-import { handleGetEmailTwoFactor } from '../accounts';
+import { handleGetEmailTwoFactor, handleReenableEmailTwoFactor } from '../accounts';
 import { sha256Hex } from '../../utils/recovery-code';
 
 // ---------------------------------------------------------------------------
@@ -549,5 +549,53 @@ describe('handleGetEmailTwoFactor — available flag', () => {
     const body = await resp.json() as { available: boolean; enabled: boolean };
     expect(body.available).toBe(true);
     expect(body.enabled).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. handleReenableEmailTwoFactor — phase-1 send rate limiting
+// ---------------------------------------------------------------------------
+
+describe('handleReenableEmailTwoFactor — phase-1 send rate limit', () => {
+  function makeReenableRequest(body: Record<string, string>): Request {
+    return new Request('https://example.com/api/two-factor/email/reenable', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', 'CF-Connecting-IP': '127.0.0.1' },
+      body: new URLSearchParams(body).toString(),
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStorageGetUserById.mockResolvedValue(makeUser());
+    mockAuthVerify.mockResolvedValue(true);
+    mockGetTwoFactor.mockResolvedValue(makeEnrollmentRow('user@example.com'));
+    mockConsumeBudgetWithWindow.mockResolvedValue({ allowed: true, remaining: 4 });
+    mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+  });
+
+  it('consumes the per-user send budget on the phase-1 (no-token) send branch', async () => {
+    const resp = await handleReenableEmailTwoFactor(
+      makeReenableRequest({ masterPasswordHash: 'hash' }), // no token ⇒ phase 1
+      fakeEnv as typeof fakeEnv,
+      'user-001'
+    );
+    expect(resp.status).toBe(200);
+    // The reenable send branch must be rate-limited under its own key.
+    expect(mockConsumeBudgetWithWindow).toHaveBeenCalledWith('user-001:email-reenable-send', 5, 600);
+    expect(mockFetch).toHaveBeenCalledOnce(); // code actually sent
+  });
+
+  it('returns 429 and sends NO email once the send budget is exhausted', async () => {
+    mockConsumeBudgetWithWindow.mockResolvedValueOnce({ allowed: false, remaining: 0 });
+    const resp = await handleReenableEmailTwoFactor(
+      makeReenableRequest({ masterPasswordHash: 'hash' }),
+      fakeEnv as typeof fakeEnv,
+      'user-001'
+    );
+    expect(resp.status).toBe(429);
+    // Hard stop: no challenge stored, no email dispatched once over budget.
+    expect(mockUpsertTwoFactor).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });

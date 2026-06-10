@@ -657,6 +657,13 @@ export async function handleSetTotpStatus(request: Request, env: Env, userId: st
       if (matchedCounter === null) {
         return errorResponse('Invalid TOTP token', 400);
       }
+      // H3 replay protection: atomically claim the matched counter so the same code
+      // cannot be replayed against the login endpoint within its ~90s validity window.
+      // A failed claim (NULL/lower stored counter check fails, or concurrent race)
+      // means the counter was already consumed — treat as verification failure.
+      if (!(await storage.updateTotpLastCounter(user.id, matchedCounter))) {
+        return errorResponse('Invalid TOTP token', 400);
+      }
       user.totpSecret = normalizedSecret;
       user.totpEnabled = true;
       if (!user.totpRecoveryCode) {
@@ -700,7 +707,13 @@ export async function handleSetTotpStatus(request: Request, env: Env, userId: st
     if (!reEnableToken) {
       return errorResponse('A current TOTP code is required to re-enable TOTP', 400);
     }
-    if ((await verifyTotpToken(user.totpSecret!, reEnableToken)) === null) {
+    const reEnableCounter = await verifyTotpToken(user.totpSecret!, reEnableToken);
+    if (reEnableCounter === null) {
+      return errorResponse('Invalid TOTP token', 400);
+    }
+    // H3 replay protection: claim the matched counter so this re-enable code cannot
+    // also be replayed at login. Failed claim ⇒ already consumed ⇒ verification failure.
+    if (!(await storage.updateTotpLastCounter(user.id, reEnableCounter))) {
       return errorResponse('Invalid TOTP token', 400);
     }
 
@@ -1683,6 +1696,7 @@ export async function handleReenableEmailTwoFactor(request: Request, env: Env, u
 
   const storage = new StorageService(env.DB);
   const auth = new AuthService(env);
+  const rateLimit = new RateLimitService(env.DB);
   const user = await storage.getUserById(userId);
   if (!user) return errorResponse('User not found', 404);
 
@@ -1717,6 +1731,12 @@ export async function handleReenableEmailTwoFactor(request: Request, env: Env, u
   const token = String(body.token ?? '').trim();
 
   if (!token) {
+    // Per-user send budget: 5 sends per 10 minutes, matching handleSendEmailSetup,
+    // so the phase-1 send branch can't be abused to spam the enrolled address.
+    const sendBudget = await rateLimit.consumeBudgetWithWindow(`${userId}:email-reenable-send`, 5, 600);
+    if (!sendBudget.allowed) {
+      return errorResponse('Too many email verification requests. Please try again later.', 429);
+    }
     const code = generateNumericCode();
     await upsertTwoFactor(env.DB, {
       userId,

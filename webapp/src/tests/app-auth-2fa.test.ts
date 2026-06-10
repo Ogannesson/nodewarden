@@ -358,3 +358,66 @@ describe('performUnlock – TOTP + Email 同时启用（Bug #15 回归）', () =
     }
   });
 });
+
+// -----------------------------------------------------------------------
+// WebAuthn 空 challenge 降级（dead-end 修复）
+// -----------------------------------------------------------------------
+
+/**
+ * 回归守卫：服务端把 WebAuthn 列为 provider 但返回空/缺失 challenge
+ * （例如 rpId/origin 未配置时的降级响应）。此前前端仍返回 kind='webauthn'，
+ * 用户点验证只会反复失败——死胡同。修复后：challenge 为空时不进 webauthn 分支，
+ * 让流程落到可用的 TOTP/Email；若 webauthn 是唯一 provider 则返回 kind='error'。
+ */
+function makeEmptyChallengeResponse(providers: string[]) {
+  const providers2: Record<string, unknown> = {
+    '7': { challenge: '', allowCredentials: [], rpId: 'example.com', status: 'ok' },
+  };
+  if (providers.includes('0')) providers2['0'] = null;
+  if (providers.includes('1')) providers2['1'] = { Email: 'u***@e***.com' };
+  return { TwoFactorProviders: providers, TwoFactorProviders2: providers2, error: 'invalid_grant' };
+}
+
+describe('performPasswordLogin – WebAuthn 空 challenge 降级', () => {
+  it('providers ["7","0"] 但 challenge 为空 → 落到 totp（不死胡同）', async () => {
+    (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue(makeEmptyChallengeResponse(['7', '0']));
+
+    const result = await performPasswordLogin('user@example.com', 'password', 600000);
+
+    expect(result.kind).toBe('totp');
+  });
+
+  it('providers ["7","1"] 但 challenge 为空 → 落到 email（不死胡同）', async () => {
+    (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue(makeEmptyChallengeResponse(['7', '1']));
+
+    const result = await performPasswordLogin('user@example.com', 'password', 600000);
+
+    expect(result.kind).toBe('email');
+  });
+
+  it('仅 ["7"] 且 challenge 为空 → kind=error（无可用降级因子）', async () => {
+    (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue(makeEmptyChallengeResponse(['7']));
+
+    const result = await performPasswordLogin('user@example.com', 'password', 600000);
+
+    expect(result.kind).toBe('error');
+  });
+});
+
+describe('performUnlock – WebAuthn 空 challenge 降级', () => {
+  it('providers ["7","0"] 但 challenge 为空 → 落到 totp', async () => {
+    (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue(makeEmptyChallengeResponse(['7', '0']));
+
+    const result = await performUnlock(MOCK_SESSION, null, 'password', 600000);
+
+    expect(result.kind).toBe('totp');
+  });
+
+  it('仅 ["7"] 且 challenge 为空 → kind=error', async () => {
+    (loginWithPassword as ReturnType<typeof vi.fn>).mockResolvedValue(makeEmptyChallengeResponse(['7']));
+
+    const result = await performUnlock(MOCK_SESSION, null, 'password', 600000);
+
+    expect(result.kind).toBe('error');
+  });
+});

@@ -419,27 +419,39 @@ export async function performPasswordLogin(
     // Prefer WebAuthn (provider 7) when the server advertises it.
     if (providerKeys.includes(PROVIDER_WEBAUTHN) && providers2[PROVIDER_WEBAUTHN]) {
       const p7 = providers2[PROVIDER_WEBAUTHN] as Record<string, unknown>;
-      const webAuthnChallenge: WebAuthnChallenge = {
-        challenge: String(p7['challenge'] ?? ''),
-        rpId: typeof p7['rpId'] === 'string' ? p7['rpId'] : undefined,
-        userVerification: typeof p7['userVerification'] === 'string' ? p7['userVerification'] : undefined,
-        timeout: typeof p7['timeout'] === 'number' ? p7['timeout'] : undefined,
-        allowCredentials: Array.isArray(p7['allowCredentials'])
-          ? (p7['allowCredentials'] as Array<{ type: string; id: string }>)
-          : [],
-      };
-      return {
-        kind: 'webauthn',
-        pendingWebAuthn: {
-          email: normalizedEmail,
-          passwordHash: derived.hash,
-          masterKey: derived.masterKey,
-          kdfIterations: derived.kdfIterations,
-          hasTotpFallback: providerKeys.includes(PROVIDER_TOTP),
-          hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
-          webAuthnChallenge,
-        },
-      };
+      const challenge = String(p7['challenge'] ?? '');
+      // An empty/missing challenge (e.g. server WebAuthn rpId/origin unconfigured) means
+      // we cannot drive the assertion — entering the webauthn branch would dead-end the
+      // user in a retry loop. Only take it when the challenge is usable; otherwise fall
+      // through so an available TOTP/Email factor can carry the login instead.
+      if (challenge) {
+        const webAuthnChallenge: WebAuthnChallenge = {
+          challenge,
+          rpId: typeof p7['rpId'] === 'string' ? p7['rpId'] : undefined,
+          userVerification: typeof p7['userVerification'] === 'string' ? p7['userVerification'] : undefined,
+          timeout: typeof p7['timeout'] === 'number' ? p7['timeout'] : undefined,
+          allowCredentials: Array.isArray(p7['allowCredentials'])
+            ? (p7['allowCredentials'] as Array<{ type: string; id: string }>)
+            : [],
+        };
+        return {
+          kind: 'webauthn',
+          pendingWebAuthn: {
+            email: normalizedEmail,
+            passwordHash: derived.hash,
+            masterKey: derived.masterKey,
+            kdfIterations: derived.kdfIterations,
+            hasTotpFallback: providerKeys.includes(PROVIDER_TOTP),
+            hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
+            webAuthnChallenge,
+          },
+        };
+      }
+      // Empty challenge with no other usable factor: surface a clear error rather than
+      // a webauthn dialog that can never succeed.
+      if (!providerKeys.includes(PROVIDER_TOTP) && !providerKeys.includes(PROVIDER_EMAIL)) {
+        return { kind: 'error', message: t('txt_webauthn_challenge_failed') };
+      }
     }
 
     // Email 2FA (provider 1) — only triggered when no WebAuthn or TOTP is available.
@@ -653,27 +665,39 @@ export async function performUnlock(
 
     if (providerKeys.includes(PROVIDER_WEBAUTHN) && providers2[PROVIDER_WEBAUTHN]) {
       const p7 = providers2[PROVIDER_WEBAUTHN] as Record<string, unknown>;
-      const webAuthnChallenge: WebAuthnChallenge = {
-        challenge: String(p7['challenge'] ?? ''),
-        rpId: typeof p7['rpId'] === 'string' ? p7['rpId'] : undefined,
-        userVerification: typeof p7['userVerification'] === 'string' ? p7['userVerification'] : undefined,
-        timeout: typeof p7['timeout'] === 'number' ? p7['timeout'] : undefined,
-        allowCredentials: Array.isArray(p7['allowCredentials'])
-          ? (p7['allowCredentials'] as Array<{ type: string; id: string }>)
-          : [],
-      };
-      return {
-        kind: 'webauthn',
-        pendingWebAuthn: {
-          email: normalizedEmail,
-          passwordHash: derived.hash,
-          masterKey: derived.masterKey,
-          kdfIterations: derived.kdfIterations,
-          hasTotpFallback: providerKeys.includes(PROVIDER_TOTP),
-          hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
-          webAuthnChallenge,
-        },
-      };
+      const challenge = String(p7['challenge'] ?? '');
+      // An empty/missing challenge (e.g. server WebAuthn rpId/origin unconfigured) means
+      // we cannot drive the assertion — entering the webauthn branch would dead-end the
+      // user in a retry loop. Only take it when the challenge is usable; otherwise fall
+      // through so an available TOTP/Email factor can carry the unlock instead.
+      if (challenge) {
+        const webAuthnChallenge: WebAuthnChallenge = {
+          challenge,
+          rpId: typeof p7['rpId'] === 'string' ? p7['rpId'] : undefined,
+          userVerification: typeof p7['userVerification'] === 'string' ? p7['userVerification'] : undefined,
+          timeout: typeof p7['timeout'] === 'number' ? p7['timeout'] : undefined,
+          allowCredentials: Array.isArray(p7['allowCredentials'])
+            ? (p7['allowCredentials'] as Array<{ type: string; id: string }>)
+            : [],
+        };
+        return {
+          kind: 'webauthn',
+          pendingWebAuthn: {
+            email: normalizedEmail,
+            passwordHash: derived.hash,
+            masterKey: derived.masterKey,
+            kdfIterations: derived.kdfIterations,
+            hasTotpFallback: providerKeys.includes(PROVIDER_TOTP),
+            hasEmailFallback: providerKeys.includes(PROVIDER_EMAIL),
+            webAuthnChallenge,
+          },
+        };
+      }
+      // Empty challenge with no other usable factor: surface a clear error rather than
+      // a webauthn dialog that can never succeed.
+      if (!providerKeys.includes(PROVIDER_TOTP) && !providerKeys.includes(PROVIDER_EMAIL)) {
+        return { kind: 'error', message: t('txt_webauthn_challenge_failed') };
+      }
     }
 
     // Email 2FA (provider 1) — only triggered when no WebAuthn or TOTP is available.
