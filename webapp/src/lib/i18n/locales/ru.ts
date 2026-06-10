@@ -651,6 +651,7 @@ const ru: Record<string, string> = {
   "txt_recovery_code_copied": "Код восстановления скопирован.",
   "txt_recovery_code_is_empty": "Код восстановления пуст",
   "txt_recovery_code_loaded": "Код восстановления загружен.",
+  "txt_recovery_code_view_rotates_warning": "При просмотре кода восстановления создаётся новый код. Прежний код сразу перестаёт работать, поэтому надёжно сохраните новый.",
   "txt_api_key": "API-ключ",
   "txt_view_api_key": "Посмотреть ключ API",
   "txt_rotate_api_key": "Поворот API-ключа",

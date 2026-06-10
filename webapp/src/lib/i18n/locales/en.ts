@@ -651,6 +651,7 @@ const en: Record<string, string> = {
   "txt_recovery_code_copied": "Recovery code copied",
   "txt_recovery_code_is_empty": "Recovery code is empty",
   "txt_recovery_code_loaded": "Recovery code loaded",
+  "txt_recovery_code_view_rotates_warning": "Viewing your recovery code generates a brand-new code. The previous code stops working immediately, so store the new one safely.",
   "txt_api_key": "API Key",
   "txt_view_api_key": "View API Key",
   "txt_rotate_api_key": "Rotate API Key",

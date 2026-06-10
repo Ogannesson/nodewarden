@@ -651,6 +651,7 @@ const zhCN: Record<string, string> = {
   "txt_recovery_code_copied": "恢复代码已复制",
   "txt_recovery_code_is_empty": "恢复代码为空",
   "txt_recovery_code_loaded": "恢复代码已加载",
+  "txt_recovery_code_view_rotates_warning": "每次查看恢复代码都会生成一个全新的代码，旧代码会立即失效，请妥善保存新代码。",
   "txt_api_key": "API 密钥",
   "txt_view_api_key": "查看 API 密钥",
   "txt_rotate_api_key": "轮换 API 密钥",

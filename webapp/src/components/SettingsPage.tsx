@@ -1006,6 +1006,9 @@ export default function SettingsPage(props: SettingsPageProps) {
         <p className="muted-inline settings-field-note">
           {t('txt_this_is_a_one_time_code_after_it_is_used_a_new_code_is_generated_automatically')}
         </p>
+        <p className="muted-inline settings-field-note">
+          {t('txt_recovery_code_view_rotates_warning')}
+        </p>
         <div className="actions">
           <button type="button" className="btn btn-secondary" onClick={() => openMasterPasswordPrompt('recovery')}>
             <ShieldCheck size={14} className="btn-icon" />
@@ -1059,6 +1062,11 @@ export default function SettingsPage(props: SettingsPageProps) {
         onConfirm={() => void submitMasterPasswordPrompt()}
         onCancel={closeMasterPasswordPrompt}
       >
+        {masterPasswordPrompt === 'recovery' && (
+          <p className="muted-inline settings-field-note">
+            {t('txt_recovery_code_view_rotates_warning')}
+          </p>
+        )}
         <label className="field">
           <span>{t('txt_master_password')}</span>
           <input

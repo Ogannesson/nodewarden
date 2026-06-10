@@ -768,6 +768,7 @@ export async function handleSetTotpStatus(request: Request, env: Env, userId: st
 export async function handleGetTotpRecoveryCode(request: Request, env: Env, userId: string): Promise<Response> {
   const storage = new StorageService(env.DB);
   const auth = new AuthService(env);
+  const rateLimit = new RateLimitService(env.DB);
   const user = await storage.getUserById(userId);
   if (!user) return errorResponse('User not found', 404);
 
@@ -802,14 +803,34 @@ export async function handleGetTotpRecoveryCode(request: Request, env: Env, user
     });
   }
 
-  // H4: If a hash is already stored, the plaintext is unavailable server-side.
-  // Return an empty string — the client should prompt the user to regenerate
-  // their recovery code via the accounts.recover-2fa flow if they've lost it.
-  // (Legacy plaintext rows are still returned as-is for one final display before
-  //  the lazy-migration path upgrades them on next login.)
+  // Legacy plaintext rows predate hashed storage: the raw code is still recoverable,
+  // so return it as-is for one final display. The lazy-migration path upgrades the row
+  // to a hash on the next recovery-code login.
   const isLegacyPlaintext = /^[A-Z2-7 ]+$/.test(user.totpRecoveryCode) && user.totpRecoveryCode.replace(/ /g, '').length === 32;
+  if (isLegacyPlaintext) {
+    return jsonResponse({
+      code: user.totpRecoveryCode,
+      object: 'twoFactorRecover',
+    });
+  }
+
+  // H4: A hash is already stored, so the original plaintext is unrecoverable. Rather than
+  // locking the user out (the old behaviour returned an empty string), regenerate: mint a
+  // fresh recovery code, persist its hash, and hand the new plaintext back once. The old
+  // hash is invalidated — acceptable since its plaintext was never knowable anyway.
+  // Per-user budget guards against accidental/abusive rapid rotation (10 per 10 minutes),
+  // mirroring the email-setup-send convention. Placed after password verification so a
+  // failed password never consumes budget.
+  const rotateBudget = await rateLimit.consumeBudgetWithWindow(`${userId}:recovery-code-rotate`, 10, 600);
+  if (!rotateBudget.allowed) {
+    return errorResponse('Too many recovery code requests. Please try again later.', 429);
+  }
+  const rotatedCode = createRecoveryCode();
+  user.totpRecoveryCode = await hashRecoveryCode(rotatedCode);
+  user.updatedAt = new Date().toISOString();
+  await storage.saveUser(user);
   return jsonResponse({
-    code: isLegacyPlaintext ? user.totpRecoveryCode : '',
+    code: rotatedCode,
     object: 'twoFactorRecover',
   });
 }

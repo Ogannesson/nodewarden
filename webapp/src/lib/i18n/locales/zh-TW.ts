@@ -651,6 +651,7 @@ const zhTW: Record<string, string> = {
   "txt_recovery_code_copied": "恢復代碼已複製",
   "txt_recovery_code_is_empty": "恢復代碼為空",
   "txt_recovery_code_loaded": "恢復代碼已加載",
+  "txt_recovery_code_view_rotates_warning": "每次檢視恢復代碼都會產生一組全新的代碼，舊代碼會立即失效，請妥善保存新代碼。",
   "txt_api_key": "API 密鑰",
   "txt_view_api_key": "查看 API 密鑰",
   "txt_rotate_api_key": "輪換 API 密鑰",
